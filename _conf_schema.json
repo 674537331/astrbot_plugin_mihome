@@ -1,0 +1,12 @@
+{
+  "mi_username": {
+    "description": "小米账号 (手机号/邮箱/小米ID)",
+    "type": "string",
+    "hint": "用于登录小米云端获取设备信息。"
+  },
+  "mi_password": {
+    "description": "小米账号密码",
+    "type": "string",
+    "hint": "你的账号密码，仅保存在本地用于云端鉴权。"
+  }
+}
