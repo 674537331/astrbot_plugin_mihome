@@ -14,7 +14,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from mijiaAPI import mijiaAPI, mijiaDevice
 
-@register("astrbot_plugin_mihome", "RyanVaderAn", "米家云端控制 (原生链接扫码版)", "v6.0-beta2")
+@register("astrbot_plugin_mihome", "RyanVaderAn", "米家云端控制 (原生链接扫码版)", "v6.0-beta4")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -28,6 +28,9 @@ class MiHomeControlPlugin(Star):
 
         self.api = mijiaAPI(self.auth_store_path)
         self._api_lock = asyncio.Lock()
+        
+        # 🚀 新增：UX 体验锁，防止多次触发登录导致弹出一堆二维码
+        self._login_in_progress = False
 
         self.action_alias = {
             "开": True, "开启": True, "打开": True, "on": True, "true": True,
@@ -35,7 +38,6 @@ class MiHomeControlPlugin(Star):
         }
 
     def _parse_device_map(self) -> dict:
-        """灵活解析设备映射表，提取 DID"""
         raw_map = self.config.get("device_map", "{}")
         parsed = {}
         
@@ -71,13 +73,17 @@ class MiHomeControlPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     @filter.command("米家登录")
     async def mihome_login(self, event: AstrMessageEvent):
-        """核心重构：拦截并直接发送小米官方生成的二维码图片链接"""
+        # 🛡️ 状态位防御：如果正在登录中，直接驳回
+        if self._login_in_progress:
+            yield event.plain_result("⏳ 当前已有米家登录流程进行中，请查看之前的二维码链接或稍候再试。")
+            return
+            
+        self._login_in_progress = True
         yield event.plain_result("⏳ 正在检查登录状态并向小米云端请求授权码，请稍候...")
         
         url_queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
         
-        # 内部类：用于拦截底层库打印到控制台的二维码链接
         class CaptureStdout:
             def __init__(self, original_stdout):
                 self.original_stdout = original_stdout
@@ -88,7 +94,6 @@ class MiHomeControlPlugin(Star):
                 self.original_stdout.write(text) 
                 self.buffer += text
                 if not self.found:
-                    # 精准匹配那句 "也可以访问链接查看二维码图片: https://..."
                     match = re.search(r'也可以访问链接查看二维码图片:\s*(https://account\.xiaomi\.com[^\s]+)', self.buffer)
                     if match:
                         self.found = True
@@ -99,6 +104,7 @@ class MiHomeControlPlugin(Star):
 
         original_stdout = sys.stdout
         sys.stdout = CaptureStdout(original_stdout)
+        pending = set()
 
         def run_login():
             try:
@@ -107,13 +113,11 @@ class MiHomeControlPlugin(Star):
                 logger.error(f"[MiHome] 登录线程异常: {e}")
                 raise e
 
-        # 加锁保护登录全流程
-        async with self._api_lock:
-            login_task = asyncio.create_task(asyncio.to_thread(run_login))
-            queue_task = asyncio.create_task(url_queue.get())
-            
-            try:
-                # 竞速等待：如果无需登录（秒进 login_task），或成功截获图片 URL（进 queue_task）
+        try:
+            async with self._api_lock:
+                login_task = asyncio.create_task(asyncio.to_thread(run_login))
+                queue_task = asyncio.create_task(url_queue.get())
+                
                 done, pending = await asyncio.wait(
                     [login_task, queue_task], 
                     return_when=asyncio.FIRST_COMPLETED,
@@ -128,31 +132,33 @@ class MiHomeControlPlugin(Star):
                         yield event.plain_result("✅ 检测到本地已存在有效授权凭证，无需重新扫码！")
                 elif queue_task in done:
                     img_url = queue_task.result()
-                    
                     yield event.plain_result(f"🔔 请点击下方链接获取二维码图片，并使用【米家APP】扫描授权：\n\n{img_url}\n\n👉 扫码并在手机上点击确认后，机器人会自动完成配置。")
                     
-                    # 挂起等待用户手机扫码完毕
-                    await login_task
-                    yield event.plain_result("🎉 扫码授权成功！云端通行证已自动保存。你可以使用 /刷新米家 或 /控制米家 了。")
+                    try:
+                        await asyncio.wait_for(login_task, timeout=120.0)
+                        yield event.plain_result("🎉 扫码授权成功！云端通行证已自动保存。你可以使用 /刷新米家 或 /控制米家 了。")
+                    except asyncio.TimeoutError:
+                        yield event.plain_result("⏳ 已发送二维码链接，但等待扫码确认超时。若你已扫码，可直接尝试 /刷新米家。")
                 else:
                     yield event.plain_result("❌ 获取二维码超时，请检查网络或稍后再试。")
                     
-            except Exception as e:
-                logger.exception(f"[MiHome] 扫码登录流程异常: {e}")
-                yield event.plain_result("❌ 登录流程发生严重异常，请检查后台日志。")
-            finally:
-                sys.stdout = original_stdout
-                for task in pending:
-                    task.cancel()
+        except Exception as e:
+            logger.exception(f"[MiHome] 扫码登录流程异常: {e}")
+            yield event.plain_result("❌ 登录流程发生严重异常，请检查后台日志。")
+        finally:
+            sys.stdout = original_stdout
+            self._login_in_progress = False  # 释放状态锁
+            for task in pending:
+                task.cancel()
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     @filter.command("刷新米家")
     async def refresh_mihome_devices(self, event: AstrMessageEvent):
-        """拉取设备列表"""
         yield event.plain_result("正在通过授权凭证拉取小米云端设备，请稍候...")
         try:
             async with self._api_lock:
+                await asyncio.to_thread(self.api.login)
                 devices = await asyncio.to_thread(self.api.get_devices_list)
             
             if not devices:
@@ -195,7 +201,6 @@ class MiHomeControlPlugin(Star):
         query: str = "", 
         args: Any = None
     ):
-        """控制米家设备"""
         logger.debug(f"[MiHome Debug] 收到控制指令 -> query={query!r}, args={args!r}, raw_msg={event.message_str!r}")
 
         device_map = self._parse_device_map()
@@ -251,6 +256,7 @@ class MiHomeControlPlugin(Star):
 
         try:
             async with self._api_lock:
+                await asyncio.to_thread(self.api.login)
                 device = mijiaDevice(self.api, did=did)
                 logger.debug(f"[MiHome] 准备下发动作 -> did={did}, action='on', value={is_on}")
                 await asyncio.to_thread(device.set, 'on', is_on)
@@ -267,5 +273,4 @@ class MiHomeControlPlugin(Star):
                 yield event.plain_result("❌ 接口报错或凭证可能已过期！请发送 /米家登录 重新扫码，若已扫码请检查设备是否离线。")
 
     async def terminate(self):
-        """生命周期清理"""
         self.api = None
