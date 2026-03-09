@@ -8,5 +8,10 @@
     "description": "小米账号密码",
     "type": "string",
     "hint": "你的账号密码，仅保存在本地用于云端鉴权。"
+  },
+  "device_map": {
+    "description": "设备名称与 DID 映射表",
+    "type": "object",
+    "hint": "在 WebUI 中以键值对形式填写，例如键填 '风扇'，值填 '740409322'。"
   }
 }
