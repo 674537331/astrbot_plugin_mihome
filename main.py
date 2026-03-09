@@ -23,7 +23,7 @@ class MiHomeAPIError(MiHomeException):
 class MiHomeTimeoutError(MiHomeException):
     pass
 
-@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v5.6")
+@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v5.8")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -73,7 +73,6 @@ class MiHomeControlPlugin(Star):
 
         valid_map = {}
         for name, cfg in parsed.items():
-            # 防御性编程：强制转换为字符串，防止纯数字键名引发异常
             name_clean = str(name).strip()
             if not name_clean:
                 continue
@@ -205,10 +204,8 @@ class MiHomeControlPlugin(Star):
     async def control_mihome_device(
         self, 
         event: AstrMessageEvent, 
-        *, 
         query: str = "", 
-        args=None, 
-        **kwargs
+        args: Any = None
     ):
         """控制米家设备 (仅限管理员私聊)"""
         device_map = self._parse_device_map()
@@ -219,7 +216,7 @@ class MiHomeControlPlugin(Star):
         # 1) 优先使用 query
         raw_input = query.strip() if isinstance(query, str) else ""
 
-        # 2) 兼容 AstrBot 某些版本传入 args
+        # 2) 兼容 AstrBot 传入 args 的情况
         if not raw_input and args:
             if isinstance(args, str):
                 raw_input = args.strip()
@@ -228,7 +225,7 @@ class MiHomeControlPlugin(Star):
             else:
                 raw_input = str(args).strip()
 
-        # 3) 最后 fallback 到原始消息文本
+        # 3) 终极 fallback 到原始消息文本
         if not raw_input:
             msg = event.message_str.strip()
             if msg.startswith("/控制米家"):
