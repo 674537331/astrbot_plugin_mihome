@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import json
 from miservice import MiAccount, MiIOService
 
 from astrbot.api.event import filter, AstrMessageEvent
@@ -7,7 +8,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v2.3")
+@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v2.4")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -15,7 +16,17 @@ class MiHomeControlPlugin(Star):
         self.config = config
         self.username = self.config.get("mi_username", "")
         self.password = self.config.get("mi_password", "")
-        self.device_map = self.config.get("device_map", {})
+        
+        # 安全解析 WebUI 传入的 JSON 格式设备映射表
+        raw_map = self.config.get("device_map", "{}")
+        if isinstance(raw_map, str):
+            try:
+                self.device_map = json.loads(raw_map)
+            except Exception as e:
+                logger.error(f"解析 device_map 失败，请检查 JSON 格式: {e}")
+                self.device_map = {}
+        else:
+            self.device_map = raw_map if isinstance(raw_map, dict) else {}
         
         # 严格遵循官方持久化数据存储规范
         plugin_data_path = get_astrbot_data_path() / "plugin_data" / self.name
@@ -76,9 +87,13 @@ class MiHomeControlPlugin(Star):
         指令：/控制米家 [设备别名] [开/关]
         示例：/控制米家 风扇 开
         """
+        if not self.device_map:
+            yield event.plain_result("❌ 你的 device_map 配置为空或格式错误，请前往 WebUI 检查配置。")
+            return
+
         # 检查设备是否在 WebUI 配置的字典中
         if device_name not in self.device_map:
-            available_devices = "、".join(self.device_map.keys()) if self.device_map else "空(请先在WebUI配置)"
+            available_devices = "、".join(self.device_map.keys())
             yield event.plain_result(f"❌ 未找到设备 '{device_name}'。当前已配置的设备有：{available_devices}。")
             return
 
