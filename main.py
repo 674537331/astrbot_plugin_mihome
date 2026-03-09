@@ -8,12 +8,13 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v2.4")
+@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v2.5")
 class MiHomeControlPlugin(Star):
-    def __init__(self, context: Context, config: AstrBotConfig):
+    # 🚀 修复点 1：给 config 加上默认值，兼容框架的异常回退机制
+    def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         # 接收 WebUI 传入的配置
-        self.config = config
+        self.config = config or {}
         self.username = self.config.get("mi_username", "")
         self.password = self.config.get("mi_password", "")
         
@@ -28,8 +29,11 @@ class MiHomeControlPlugin(Star):
         else:
             self.device_map = raw_map if isinstance(raw_map, dict) else {}
         
-        # 严格遵循官方持久化数据存储规范
-        plugin_data_path = get_astrbot_data_path() / "plugin_data" / self.name
+        # 🚀 修复点 2：强转 str 并使用 os.path.join 拼接路径，杜绝所有版本的路径解析 bug
+        base_data_path = str(get_astrbot_data_path())
+        plugin_name = getattr(self, "name", "astrbot_plugin_mihome")
+        plugin_data_path = os.path.join(base_data_path, "plugin_data", plugin_name)
+        
         os.makedirs(plugin_data_path, exist_ok=True)
         
         # 将小米的 Token 缓存文件安全地存放在规范目录下
