@@ -2,7 +2,7 @@
   "mi_username": {
     "type": "string",
     "description": "小米账号 (手机号/邮箱/小米ID)",
-    "hint": "用于登录小米云端获取设备信息。"
+    "hint": "用于登录小米云端获取设备信息。强烈建议使用纯数字小米ID以规避风控。"
   },
   "mi_password": {
     "type": "string",
@@ -13,7 +13,7 @@
   "device_map": {
     "type": "text",
     "description": "设备控制元数据映射表 (JSON)",
-    "hint": "支持简写与高级配置混编。\n示例:\n{\n  \"净化器\": \"12345\",\n  \"风扇\": {\"did\": \"67890\", \"siid\": 2, \"piid\": 1}\n}",
+    "hint": "支持简写与高级配置混编。\n示例:\n{\n  \"净化器\": {\"did\": \"685609385\", \"siid\": 2, \"piid\": 2},\n  \"风扇\": \"740409322\"\n}",
     "default": "{}",
     "editor_mode": true,
     "editor_language": "json"
