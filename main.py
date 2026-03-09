@@ -25,7 +25,7 @@ class MiHomeAPIError(MiHomeException):
 class MiHomeTimeoutError(MiHomeException):
     pass
 
-@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v5.9")
+@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v5.9.1")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -55,32 +55,44 @@ class MiHomeControlPlugin(Star):
         return username, password
 
     def _parse_device_map(self) -> dict:
+        """严格校验并格式化设备映射表 (恢复完整的错误日志)"""
         raw_map = self.config.get("device_map", "{}")
         parsed = {}
         
         if isinstance(raw_map, str):
             try:
                 parsed = json.loads(raw_map)
-            except Exception:
+            except Exception as e:
+                logger.error(f"[MiHome] device_map JSON 解析失败: {e}")
                 return {}
         elif isinstance(raw_map, dict):
             parsed = raw_map
+
+        if not isinstance(parsed, dict):
+            logger.error("[MiHome] device_map 格式不正确，必须是字典/对象结构。")
+            return {}
 
         valid_map = {}
         for name, cfg in parsed.items():
             name_clean = str(name).strip()
             if not name_clean: continue
+            
             if isinstance(cfg, str) and cfg.strip():
                 valid_map[name_clean] = {"did": cfg.strip(), "siid": 2, "piid": 1}
             elif isinstance(cfg, dict):
                 did = str(cfg.get("did", "")).strip()
-                if not did: continue
+                if not did:
+                    logger.warning(f"[MiHome] 设备 '{name_clean}' 缺少 did，已跳过。")
+                    continue
                 try:
                     siid = int(cfg.get("siid", 2))
                     piid = int(cfg.get("piid", 1))
                     valid_map[name_clean] = {"did": did, "siid": siid, "piid": piid}
                 except (ValueError, TypeError):
-                    pass
+                    logger.warning(f"[MiHome] 设备 '{name_clean}' 的 siid/piid 格式错误，已跳过。")
+            else:
+                logger.warning(f"[MiHome] 设备 '{name_clean}' 配置类型不合法，已跳过。")
+                
         return valid_map
 
     async def _get_mi_service(self) -> MiIOService:
@@ -92,6 +104,8 @@ class MiHomeControlPlugin(Star):
 
         async with self._service_lock:
             if self._cached_credentials != current_creds:
+                if self._cached_credentials != ("", ""):
+                    logger.info("[MiHome] 检测到账号凭据变更，正在清理旧缓存...")
                 self._mi_service = None
                 self._cached_credentials = current_creds
 
@@ -102,6 +116,7 @@ class MiHomeControlPlugin(Star):
                 account = MiAccount(username, password, self.token_store_path)
                 await asyncio.wait_for(account.login('xiaomiio'), timeout=15.0)
                 self._mi_service = MiIOService(account)
+                logger.info("[MiHome] MiService 登录成功并已缓存")
                 return self._mi_service
             except asyncio.TimeoutError as e:
                 raise MiHomeTimeoutError("登录小米云端超时") from e
@@ -125,6 +140,7 @@ class MiHomeControlPlugin(Star):
                 err_str = str(e).lower()
                 is_auth_issue = any(k in err_str for k in ["auth", "token", "unauthorized", "sign", "401", "login"])
                 if is_auth_issue and attempt < max_retries:
+                    logger.warning(f"[MiHome] 鉴权可能失效 ({e})，正在重试...")
                     self._mi_service = None
                     self._cached_credentials = ("", "") 
                     continue  
@@ -147,6 +163,9 @@ class MiHomeControlPlugin(Star):
             
             result_texts = [f"✅ 成功找到 {total_count} 个设备" + (f" (仅展示前{display_limit}个)：\n" if total_count > display_limit else "：\n")]
             for idx, dev in enumerate(devices_to_show):
+                # 防御性判断，防止脏数据导致崩溃
+                if not isinstance(dev, dict): continue
+                
                 name = dev.get('name', '未知设备')
                 if len(name) > 20: name = name[:18] + ".."
                 model = dev.get('model', '未知型号')
@@ -175,27 +194,26 @@ class MiHomeControlPlugin(Star):
         query: str = "", 
         args: Any = None
     ):
-        """控制米家设备 (v5.9 终极拼接版)"""
+        """控制米家设备 (v5.9.1 定稿版)"""
         
-        # 🚀 核心探针：打印框架传入的真实参数碎片
-        logger.info(f"[MiHome Debug] 收到控制指令 -> query={query!r}, args={args!r}, raw_msg={event.message_str!r}")
+        # 🚀 探针日志降级为 debug
+        logger.debug(f"[MiHome Debug] 收到控制指令 -> query={query!r}, args={args!r}, raw_msg={event.message_str!r}")
 
         device_map = self._parse_device_map()
         if not device_map:
             yield event.plain_result("❌ 配置为空或格式错误，请前往 WebUI 检查 `device_map`。")
             return
 
-        # 🚀 增强解析逻辑：直接从原始消息字符串中提取，作为最稳妥的兜底
+        # 🚀 严谨的正则前缀移除
         full_msg = event.message_str.strip()
-        clean_msg = re.sub(r'^/?控制米家', '', full_msg).strip()
+        clean_msg = re.sub(r'^/?控制米家(?:\s+|$)', '', full_msg).strip()
         
         try:
-            # 优先使用 shlex 处理复杂空格，若失败则退化为普通 split
             parts = shlex.split(clean_msg)
         except Exception:
             parts = clean_msg.split()
 
-        # 如果兜底切割出来的碎片依然不够，再尝试用 query 和 args 拼装
+        # 兜底：如果连碎块都没拿到，尝试用 query 和 args 拼装
         if len(parts) < 2:
             raw_parts = []
             if isinstance(query, str) and query.strip():
