@@ -25,7 +25,7 @@ class MiHomeAPIError(MiHomeException):
 class MiHomeTimeoutError(MiHomeException):
     pass
 
-@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v5.9.1")
+@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v5.9.2")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -55,7 +55,7 @@ class MiHomeControlPlugin(Star):
         return username, password
 
     def _parse_device_map(self) -> dict:
-        """严格校验并格式化设备映射表 (恢复完整的错误日志)"""
+        """严格校验并格式化设备映射表"""
         raw_map = self.config.get("device_map", "{}")
         parsed = {}
         
@@ -138,12 +138,19 @@ class MiHomeControlPlugin(Star):
                 raise  
             except Exception as e:
                 err_str = str(e).lower()
-                is_auth_issue = any(k in err_str for k in ["auth", "token", "unauthorized", "sign", "401", "login"])
-                if is_auth_issue and attempt < max_retries:
-                    logger.warning(f"[MiHome] 鉴权可能失效 ({e})，正在重试...")
-                    self._mi_service = None
-                    self._cached_credentials = ("", "") 
-                    continue  
+                is_auth_issue = any(
+                    k in err_str for k in ["auth", "token", "unauthorized", "sign", "401", "login"]
+                )
+
+                if is_auth_issue:
+                    if attempt < max_retries:
+                        logger.warning(f"[MiHome] 鉴权可能失效 ({e})，正在重试...")
+                        self._mi_service = None
+                        self._cached_credentials = ("", "") 
+                        continue
+                    # 🚀 补丁1：彻底熔断，防止鉴权失败掉入普通 APIError
+                    raise MiHomeAuthError(f"控制接口鉴权失败: {e}") from e
+
                 raise MiHomeAPIError(f"云端接口异常: {e}") from e
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -162,27 +169,32 @@ class MiHomeControlPlugin(Star):
             devices_to_show = devices[:display_limit]
             
             result_texts = [f"✅ 成功找到 {total_count} 个设备" + (f" (仅展示前{display_limit}个)：\n" if total_count > display_limit else "：\n")]
-            for idx, dev in enumerate(devices_to_show):
-                # 防御性判断，防止脏数据导致崩溃
+            
+            display_index = 0
+            for dev in devices_to_show:
                 if not isinstance(dev, dict): continue
+                display_index += 1
                 
                 name = dev.get('name', '未知设备')
                 if len(name) > 20: name = name[:18] + ".."
                 model = dev.get('model', '未知型号')
                 did = dev.get('did', '未知DID')
                 is_online = "🟢在线" if dev.get('isOnline') else "🔴离线"
-                result_texts.append(f"{idx + 1}. 【{name}】\n   - 型号: {model}\n   - DID: {did}\n   - 状态: {is_online}")
+                result_texts.append(f"{display_index}. 【{name}】\n   - 型号: {model}\n   - DID: {did}\n   - 状态: {is_online}")
                 
             if total_count > display_limit:
                 result_texts.append(f"\n...以及其他 {total_count - display_limit} 个设备。")
                 
             yield event.plain_result("\n".join(result_texts))
             
-        except MiHomeAuthError:
+        except MiHomeAuthError as e:
+            logger.error(f"[MiHome] 刷新列表鉴权失败: {e}")
             yield event.plain_result("❌ 鉴权失败，请检查账号密码配置是否正确。")
-        except MiHomeTimeoutError:
+        except MiHomeTimeoutError as e:
+            logger.error(f"[MiHome] 刷新列表超时: {e}")
             yield event.plain_result("❌ 请求超时，小米云端响应缓慢，请稍后再试。")
-        except Exception:
+        except Exception as e:
+            logger.exception(f"[MiHome] 刷新列表内部错误: {e}")
             yield event.plain_result("❌ 发生内部错误，请检查后台日志。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -194,9 +206,7 @@ class MiHomeControlPlugin(Star):
         query: str = "", 
         args: Any = None
     ):
-        """控制米家设备 (v5.9.1 定稿版)"""
-        
-        # 🚀 探针日志降级为 debug
+        """控制米家设备 (v5.9.2 最终排障版)"""
         logger.debug(f"[MiHome Debug] 收到控制指令 -> query={query!r}, args={args!r}, raw_msg={event.message_str!r}")
 
         device_map = self._parse_device_map()
@@ -204,7 +214,6 @@ class MiHomeControlPlugin(Star):
             yield event.plain_result("❌ 配置为空或格式错误，请前往 WebUI 检查 `device_map`。")
             return
 
-        # 🚀 严谨的正则前缀移除
         full_msg = event.message_str.strip()
         clean_msg = re.sub(r'^/?控制米家(?:\s+|$)', '', full_msg).strip()
         
@@ -213,7 +222,6 @@ class MiHomeControlPlugin(Star):
         except Exception:
             parts = clean_msg.split()
 
-        # 兜底：如果连碎块都没拿到，尝试用 query 和 args 拼装
         if len(parts) < 2:
             raw_parts = []
             if isinstance(query, str) and query.strip():
@@ -260,18 +268,25 @@ class MiHomeControlPlugin(Star):
             props = [[siid, piid, is_on]]
             result = await self._call_mi_api("miot_set_props", did, props)
             
+            # 🚀 补丁2：透明化小米云端的真实返回体
+            logger.debug(f"[MiHome] miot_set_props -> did={did}, props={props}, result={result!r}")
+            
             if isinstance(result, list) and result and all(isinstance(i, dict) and i.get("code") == 0 for i in result):
                 yield event.plain_result(f"✅ 操作成功！已发送指令给【{device_name}】。")
             else:
                 raise MiHomeAPIError(f"设备返回异常状态码: {result}")
                 
-        except MiHomeAuthError:
+        except MiHomeAuthError as e:
+            logger.error(f"[MiHome] 控制鉴权失败: {e}")
             yield event.plain_result("❌ 会话或鉴权失效，请检查账号状态或稍后再试。")
-        except MiHomeTimeoutError:
+        except MiHomeTimeoutError as e:
+            logger.error(f"[MiHome] 控制设备超时: {e}")
             yield event.plain_result("❌ 云端请求超时，设备可能离线或网络拥堵。")
-        except MiHomeAPIError:
-            yield event.plain_result("⚠️ 指令下发异常，设备可能未正常执行。(请检查 siid/piid 参数是否正确)")
-        except Exception:
+        except MiHomeAPIError as e:
+            logger.error(f"[MiHome] 指令下发异常: {e}")
+            yield event.plain_result("⚠️ 指令下发异常，设备可能未正常执行。(请检查后台返回的错误码)")
+        except Exception as e:
+            logger.exception(f"[MiHome] 控制过程内部错误: {e}")
             yield event.plain_result("❌ 发生未知内部错误，请检查内部日志。")
 
     async def terminate(self):
