@@ -1,19 +1,8 @@
 {
-  "mi_username": {
-    "type": "string",
-    "description": "小米账号 (手机号/邮箱/小米ID)",
-    "hint": "用于登录小米云端获取设备信息。强烈建议使用纯数字小米ID以规避风控。"
-  },
-  "mi_password": {
-    "type": "string",
-    "description": "小米账号密码",
-    "hint": "你的账号密码。鉴于明文保存，仅限管理员且请妥善保管。",
-    "obvious_hint": true
-  },
   "device_map": {
     "type": "text",
-    "description": "设备控制元数据映射表 (JSON)",
-    "hint": "支持简写与高级配置混编。\n示例:\n{\n  \"净化器\": {\"did\": \"685609385\", \"siid\": 2, \"piid\": 2},\n  \"风扇\": \"740409322\"\n}",
+    "description": "设备别名与 DID 映射表 (JSON)",
+    "hint": "得益于 mijiaAPI 强大的底层封装，现在只需填入设备名称和对应的 DID 即可，彻底告别复杂的 siid 和 piid！\n示例:\n{\n  \"净化器\": \"685609385\",\n  \"风扇\": \"740409322\",\n  \"空调\": \"646717969\"\n}",
     "default": "{}",
     "editor_mode": true,
     "editor_language": "json"
