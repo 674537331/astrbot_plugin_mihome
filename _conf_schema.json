@@ -1,19 +1,20 @@
 {
   "mi_username": {
-    "description": "小米账号 (手机号/邮箱/小米ID)",
     "type": "string",
+    "description": "小米账号 (手机号/邮箱/小米ID)",
     "hint": "用于登录小米云端获取设备信息。"
   },
   "mi_password": {
-    "description": "小米账号密码",
     "type": "string",
-    "hint": "你的账号密码，仅保存在本地用于云端鉴权。"
+    "description": "小米账号密码",
+    "hint": "你的账号密码。鉴于明文保存，仅限管理员且请妥善保管。",
+    "obvious_hint": true
   },
   "device_map": {
-    "description": "设备名称与 DID 映射表",
-    "type": "string",
+    "type": "text",
+    "description": "设备控制元数据映射表 (JSON)",
+    "hint": "支持简写与高级配置混编。\n示例:\n{\n  \"净化器\": \"12345\",\n  \"风扇\": {\"did\": \"67890\", \"siid\": 2, \"piid\": 1}\n}",
     "default": "{}",
-    "hint": "请在此处填入 JSON 格式的映射，例如：{\"风扇\": \"740409322\", \"净化器\": \"685609385\"}",
     "editor_mode": true,
     "editor_language": "json"
   }
