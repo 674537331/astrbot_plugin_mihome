@@ -2,9 +2,11 @@
 import os
 import json
 import asyncio
+import shlex
+import re
 from typing import Tuple, Any
-from miservice import MiAccount, MiIOService
 
+from miservice import MiAccount, MiIOService
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
@@ -23,7 +25,7 @@ class MiHomeAPIError(MiHomeException):
 class MiHomeTimeoutError(MiHomeException):
     pass
 
-@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v5.8")
+@register("astrbot_plugin_mihome", "RyanVaderAn", "米家设备云端控制插件 (基于 MiService)", "v5.9")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -48,55 +50,40 @@ class MiHomeControlPlugin(Star):
         }
 
     def _get_credentials(self) -> Tuple[str, str]:
-        """动态读取账号密码"""
         username = self.config.get("mi_username", "").strip()
         password = self.config.get("mi_password", "").strip()
         return username, password
 
     def _parse_device_map(self) -> dict:
-        """严格校验并格式化设备映射表"""
         raw_map = self.config.get("device_map", "{}")
         parsed = {}
         
         if isinstance(raw_map, str):
             try:
                 parsed = json.loads(raw_map)
-            except Exception as e:
-                logger.error(f"[MiHome] device_map JSON 解析失败: {e}")
+            except Exception:
                 return {}
         elif isinstance(raw_map, dict):
             parsed = raw_map
 
-        if not isinstance(parsed, dict):
-            logger.error("[MiHome] device_map 格式不正确，必须是字典/对象结构。")
-            return {}
-
         valid_map = {}
         for name, cfg in parsed.items():
             name_clean = str(name).strip()
-            if not name_clean:
-                continue
-                
+            if not name_clean: continue
             if isinstance(cfg, str) and cfg.strip():
                 valid_map[name_clean] = {"did": cfg.strip(), "siid": 2, "piid": 1}
             elif isinstance(cfg, dict):
                 did = str(cfg.get("did", "")).strip()
-                if not did:
-                    logger.warning(f"[MiHome] 设备 '{name_clean}' 缺少 did，已跳过。")
-                    continue
+                if not did: continue
                 try:
                     siid = int(cfg.get("siid", 2))
                     piid = int(cfg.get("piid", 1))
                     valid_map[name_clean] = {"did": did, "siid": siid, "piid": piid}
                 except (ValueError, TypeError):
-                    logger.warning(f"[MiHome] 设备 '{name_clean}' 的 siid/piid 格式错误，已跳过。")
-            else:
-                logger.warning(f"[MiHome] 设备 '{name_clean}' 配置类型不合法，已跳过。")
-                
+                    pass
         return valid_map
 
     async def _get_mi_service(self) -> MiIOService:
-        """带锁懒加载、凭据热更新与缓存复用的云端服务获取机制"""
         current_creds = self._get_credentials()
         username, password = current_creds
         
@@ -104,10 +91,7 @@ class MiHomeControlPlugin(Star):
             raise MiHomeAuthError("请先在 WebUI 配置小米账号和密码。")
 
         async with self._service_lock:
-            # 凭据热更新判断：如果配置被修改，强制清理旧会话
             if self._cached_credentials != current_creds:
-                if self._cached_credentials != ("", ""):
-                    logger.info("[MiHome] 检测到账号凭据已变更，正在清理旧服务缓存...")
                 self._mi_service = None
                 self._cached_credentials = current_creds
 
@@ -118,16 +102,14 @@ class MiHomeControlPlugin(Star):
                 account = MiAccount(username, password, self.token_store_path)
                 await asyncio.wait_for(account.login('xiaomiio'), timeout=15.0)
                 self._mi_service = MiIOService(account)
-                logger.info("[MiHome] MiService 登录成功并已缓存")
                 return self._mi_service
             except asyncio.TimeoutError as e:
                 raise MiHomeTimeoutError("登录小米云端超时") from e
             except Exception as e:
-                self._cached_credentials = ("", "")  # 登录失败，重置凭据快照
+                self._cached_credentials = ("", "")
                 raise MiHomeAuthError(f"鉴权或初始化失败: {e}") from e
 
     async def _call_mi_api(self, func_name: str, *args, **kwargs) -> Any:
-        """统一的 API 调用包装器，包含超时控制与 Token 失效自愈机制"""
         max_retries = 1
         for attempt in range(max_retries + 1):
             try:
@@ -142,25 +124,19 @@ class MiHomeControlPlugin(Star):
             except Exception as e:
                 err_str = str(e).lower()
                 is_auth_issue = any(k in err_str for k in ["auth", "token", "unauthorized", "sign", "401", "login"])
-                
                 if is_auth_issue and attempt < max_retries:
-                    logger.warning(f"[MiHome] 检测到可能的会话失效 ({e})，正在清空缓存并自动重试...")
                     self._mi_service = None
                     self._cached_credentials = ("", "") 
                     continue  
-                
-                raise MiHomeAPIError(f"云端接口调用异常: {e}") from e
+                raise MiHomeAPIError(f"云端接口异常: {e}") from e
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     @filter.command("刷新米家")
     async def refresh_mihome_devices(self, event: AstrMessageEvent):
-        """测试 MiService 连通性，拉取并打印设备列表 (仅限管理员私聊)"""
         yield event.plain_result("正在连接小米云端拉取设备，请稍候...")
-        
         try:
             devices = await self._call_mi_api("device_list")
-            
             if not devices:
                 yield event.plain_result("✅ 拉取成功，但账号下没有绑定任何 MIoT 设备。")
                 return
@@ -170,11 +146,9 @@ class MiHomeControlPlugin(Star):
             devices_to_show = devices[:display_limit]
             
             result_texts = [f"✅ 成功找到 {total_count} 个设备" + (f" (仅展示前{display_limit}个)：\n" if total_count > display_limit else "：\n")]
-            
             for idx, dev in enumerate(devices_to_show):
                 name = dev.get('name', '未知设备')
-                if len(name) > 20:
-                    name = name[:18] + ".."
+                if len(name) > 20: name = name[:18] + ".."
                 model = dev.get('model', '未知型号')
                 did = dev.get('did', '未知DID')
                 is_online = "🟢在线" if dev.get('isOnline') else "🔴离线"
@@ -185,18 +159,12 @@ class MiHomeControlPlugin(Star):
                 
             yield event.plain_result("\n".join(result_texts))
             
-        except MiHomeAuthError as e:
-            logger.error(f"[MiHome] 鉴权彻底失败: {e}")
+        except MiHomeAuthError:
             yield event.plain_result("❌ 鉴权失败，请检查账号密码配置是否正确。")
         except MiHomeTimeoutError:
-            logger.error("[MiHome] 拉取设备列表超时")
             yield event.plain_result("❌ 请求超时，小米云端响应缓慢，请稍后再试。")
-        except MiHomeAPIError as e:
-            logger.error(f"[MiHome] 拉取设备失败: {e}")
-            yield event.plain_result("❌ 拉取设备异常，云端接口报错，请查阅后台日志。")
         except Exception:
-            logger.exception("[MiHome] 拉取设备列表时发生未捕获异常")
-            yield event.plain_result("❌ 发生未知内部错误，请检查后台日志。")
+            yield event.plain_result("❌ 发生内部错误，请检查后台日志。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
@@ -207,35 +175,44 @@ class MiHomeControlPlugin(Star):
         query: str = "", 
         args: Any = None
     ):
-        """控制米家设备 (仅限管理员私聊)"""
+        """控制米家设备 (v5.9 终极拼接版)"""
+        
+        # 🚀 核心探针：打印框架传入的真实参数碎片
+        logger.info(f"[MiHome Debug] 收到控制指令 -> query={query!r}, args={args!r}, raw_msg={event.message_str!r}")
+
         device_map = self._parse_device_map()
         if not device_map:
             yield event.plain_result("❌ 配置为空或格式错误，请前往 WebUI 检查 `device_map`。")
             return
 
-        # 1) 优先使用 query
-        raw_input = query.strip() if isinstance(query, str) else ""
+        # 🚀 增强解析逻辑：直接从原始消息字符串中提取，作为最稳妥的兜底
+        full_msg = event.message_str.strip()
+        clean_msg = re.sub(r'^/?控制米家', '', full_msg).strip()
+        
+        try:
+            # 优先使用 shlex 处理复杂空格，若失败则退化为普通 split
+            parts = shlex.split(clean_msg)
+        except Exception:
+            parts = clean_msg.split()
 
-        # 2) 兼容 AstrBot 传入 args 的情况
-        if not raw_input and args:
-            if isinstance(args, str):
-                raw_input = args.strip()
-            elif isinstance(args, (list, tuple)):
-                raw_input = " ".join(str(x).strip() for x in args if str(x).strip())
-            else:
-                raw_input = str(args).strip()
+        # 如果兜底切割出来的碎片依然不够，再尝试用 query 和 args 拼装
+        if len(parts) < 2:
+            raw_parts = []
+            if isinstance(query, str) and query.strip():
+                raw_parts.append(query.strip())
+            if args:
+                if isinstance(args, str) and args.strip():
+                    raw_parts.append(args.strip())
+                elif isinstance(args, (list, tuple)):
+                    raw_parts.extend(str(x).strip() for x in args if str(x).strip())
+                else:
+                    arg_str = str(args).strip()
+                    if arg_str:
+                        raw_parts.append(arg_str)
+            
+            raw_input = " ".join(raw_parts).strip()
+            parts = raw_input.split()
 
-        # 3) 终极 fallback 到原始消息文本
-        if not raw_input:
-            msg = event.message_str.strip()
-            if msg.startswith("/控制米家"):
-                raw_input = msg[len("/控制米家"):].strip()
-            elif msg.startswith("控制米家"):
-                raw_input = msg[len("控制米家"):].strip()
-            else:
-                raw_input = msg
-
-        parts = raw_input.split()
         if len(parts) < 2:
             yield event.plain_result("❌ 格式错误。正确用法：/控制米家 [设备别名] [开/关]")
             return
@@ -270,19 +247,14 @@ class MiHomeControlPlugin(Star):
             else:
                 raise MiHomeAPIError(f"设备返回异常状态码: {result}")
                 
-        except MiHomeAuthError as e:
-            logger.error(f"[MiHome] 控制时鉴权失效且重连失败: {e}")
+        except MiHomeAuthError:
             yield event.plain_result("❌ 会话或鉴权失效，请检查账号状态或稍后再试。")
         except MiHomeTimeoutError:
-            logger.error(f"[MiHome] 控制设备 '{device_name}' 超时")
             yield event.plain_result("❌ 云端请求超时，设备可能离线或网络拥堵。")
-        except MiHomeAPIError as e:
-            logger.warning(f"[MiHome] 控制 '{device_name}' 失败: {e}")
-            yield event.plain_result(f"⚠️ 指令下发异常，设备可能未正常执行。(请检查 siid/piid 参数是否正确)")
+        except MiHomeAPIError:
+            yield event.plain_result("⚠️ 指令下发异常，设备可能未正常执行。(请检查 siid/piid 参数是否正确)")
         except Exception:
-            logger.exception(f"[MiHome] 控制米家设备 '{device_name}' 时发生未捕获异常")
             yield event.plain_result("❌ 发生未知内部错误，请检查内部日志。")
 
     async def terminate(self):
-        """生命周期结束时的清理工作"""
         self._mi_service = None
