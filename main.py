@@ -4,14 +4,15 @@ import shlex
 import re
 from typing import Any, Dict, List, Tuple, Optional
 
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+# 🚀 优化 1：移除了未使用的 MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
 from .data_manager import MiHomeDataManager
 from .mihome_client import MiHomeClient, MiHomeAuthError, MiHomeControlError, MiHomeClientError
 
-@register("astrbot_plugin_mihome", "Ryan", "米家云端智能管家", "6.2.9")
+@register("astrbot_plugin_mihome", "Ryan", "米家云端智能管家", "6.3.1")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -89,6 +90,17 @@ class MiHomeControlPlugin(Star):
             
         return val_str
 
+    # 🚀 优化 2：新增属性名去重归一化函数
+    def _normalize_prop_keys(self, keys: List[str]) -> List[str]:
+        normalized = {}
+        for key in keys:
+            k = str(key).strip()
+            if not k:
+                continue
+            snake = k.replace("-", "_")
+            normalized[snake] = snake
+        return list(normalized.keys())
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登录")
     async def mihome_login(self, event: AstrMessageEvent):
@@ -135,7 +147,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("刷新米家")
     async def refresh_mihome_devices(self, event: AstrMessageEvent):
-        yield event.plain_result("⏳ 正在同步设备列表并探测属性...")
+        yield event.plain_result("⏳ 正在同步设备列表...")
         device_map = self._parse_device_map()
         try:
             devs = await self.client.get_devices()
@@ -144,33 +156,69 @@ class MiHomeControlPlugin(Star):
                 return
             
             res = [f"✅ 找到 {len(devs)} 个设备："]
-            for i, d in enumerate(devs[:20], 1):
+            for i, d in enumerate(devs, 1):
                 did_str = str(d.get('did')).strip()
                 name = d.get('name')
-                is_online = d.get('isOnline')
-                status_icon = '🟢' if is_online else '🔴'
+                status_icon = '🟢' if d.get('isOnline') else '🔴'
                 
                 aliases = [k for k, v in device_map.items() if str(v).strip() == did_str]
                 alias_str = "/".join(aliases) if aliases else "未配置别名"
                 
-                if aliases:
-                    if is_online:
-                        props = await self.client.get_device_props(did_str)
-                        if props.get("__error__"):
-                            menu = f"探测异常 ({props['__error__']})"
-                        else:
-                            menu = ", ".join(props.keys()) if props else "未探测到属性"
-                        res.append(f"{i}. 【{alias_str}】({name}) [{status_icon}] ({did_str})\n   └─ 🔎 探测属性: {menu}")
-                    else:
-                        res.append(f"{i}. 【{alias_str}】({name}) [{status_icon}] ({did_str})\n   └─ 💤 设备离线，跳过属性探测")
-                else:
-                    res.append(f"{i}. 【未配置别名】({name}) [{status_icon}] ({did_str})")
-                    
+                res.append(f"{i}. 【{alias_str}】({name}) [{status_icon}] ({did_str})")
+                
+            res.append("\n💡 提示: 发送 /米家详情 [别名] 可查看设备的详细属性菜单。")
             yield event.plain_result("\n".join(res))
+            
         except MiHomeClientError as e:
             yield event.plain_result(f"❌ 同步设备失败: {e}")
         except Exception as e:
             yield event.plain_result(f"❌ 未知同步异常: {e}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("米家详情")
+    async def mihome_device_detail(self, event: AstrMessageEvent):
+        device_map = self._parse_device_map()
+        msg = event.message_str.strip()
+        cmd_prefix = r'^/?米家详情\s*'
+        content = re.sub(cmd_prefix, '', msg).strip()
+
+        if not content:
+            # 🚀 优化 4：补充示例
+            yield event.plain_result("❌ 缺少参数。\n格式：/米家详情 [设备别名]\n示例：/米家详情 空调")
+            return
+
+        try:
+            parts = shlex.split(content)
+        except Exception:
+            parts = content.split()
+
+        alias, _ = self._match_device_alias(parts, device_map)
+        
+        if not alias:
+            yield event.plain_result(f"❌ 找不到对应设备。请检查 WebUI 中的别名配置。")
+            return
+
+        did = device_map[alias]
+        yield event.plain_result(f"⏳ 正在探测【{alias}】的能力菜单...")
+
+        try:
+            props = await self.client.get_device_props(did)
+            if props.get("__error__"):
+                yield event.plain_result(f"❌ 探测异常: {props['__error__']}")
+            else:
+                if not props:
+                    yield event.plain_result(f"⚠️ 【{alias}】未探测到公开属性。")
+                else:
+                    # 🚀 优化 2 & 3：去重归一化 + 长度上限截断
+                    prop_keys = self._normalize_prop_keys(list(props.keys()))
+                    shown = prop_keys[:40]
+                    prop_list_str = ", ".join(shown)
+                    if len(prop_keys) > 40:
+                        prop_list_str += f" ... 共{len(prop_keys)}项"
+                    yield event.plain_result(f"✅ 【{alias}】支持的高级属性:\n{prop_list_str}")
+        except Exception as e:
+            logger.error(f"[MiHome] 获取属性异常: {e}")
+            yield event.plain_result(f"❌ 获取异常: {e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家控制")
@@ -181,7 +229,8 @@ class MiHomeControlPlugin(Star):
         content = re.sub(cmd_prefix, '', msg).strip()
 
         if not content:
-            yield event.plain_result("❌ 缺少参数。\n格式：/米家控制 [设备名] [动作/属性] [值]")
+            # 🚀 优化 4：补充完整控制示例
+            yield event.plain_result("❌ 缺少参数。\n格式：/米家控制 [设备名] [动作/属性] [值]\n示例：\n/米家控制 空调 开\n/米家控制 空调 温度 26")
             return
 
         try:
@@ -238,7 +287,6 @@ class MiHomeControlPlugin(Star):
                 yield event.plain_result(f"❌ 不支持的动作或属性不完整: {token}")
                 return
 
-        # 高级属性透传链路
         raw_prop = remaining_parts[0]
         raw_val_str = " ".join(remaining_parts[1:])
         
