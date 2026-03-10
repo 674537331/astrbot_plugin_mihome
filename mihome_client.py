@@ -58,29 +58,30 @@ class MiHomeClient:
         }
 
     async def logout(self) -> bool:
-        if self._login_process and self._login_process.returncode is None:
-            try:
-                self._login_process.kill()
-                await self._login_process.wait()
-            except ProcessLookupError:
-                pass
-            except Exception as e:
-                logger.warning(f"[MiHome] 强制中止登录进程失败: {e}")
-            finally:
-                self._login_process = None
+        async with self._api_lock:
+            if self._login_process and self._login_process.returncode is None:
+                try:
+                    self._login_process.kill()
+                    await self._login_process.wait()
+                except ProcessLookupError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"[MiHome] 强制中止登录进程失败: {e}")
+                finally:
+                    self._login_process = None
 
-        self._login_status = LOGIN_IDLE 
-        ok = self.data_manager.clear_auth_file()
-        self.api = mijiaAPI(self.data_manager.get_auth_path())
-        
-        self.data_manager.update_state(
-            last_login_at="", 
-            last_login_error="", 
-            last_shared_error="",
-            last_control_error="", 
-            last_control_device=""
-        )
-        return ok
+            self._login_status = LOGIN_IDLE 
+            ok = self.data_manager.clear_auth_file()
+            self.api = mijiaAPI(self.data_manager.get_auth_path())
+            
+            self.data_manager.update_state(
+                last_login_at="", 
+                last_login_error="", 
+                last_shared_error="",
+                last_control_error="", 
+                last_control_device=""
+            )
+            return ok
 
     async def login(self, qr_callback: Union[Callable[[str], Awaitable[None]], Callable[[str], None]]) -> Dict[str, Any]:
         if self._login_status != LOGIN_IDLE:
@@ -91,65 +92,70 @@ class MiHomeClient:
         qr_found = False
         full_buffer = ""
         
+        proc: Optional[asyncio.subprocess.Process] = None
+        
         try:
             async with self._api_lock:
-                self._login_process = await asyncio.create_subprocess_exec(
+                proc = await asyncio.create_subprocess_exec(
                     sys.executable, "-u", self._worker_script, self.data_manager.get_auth_path(),
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
                 )
+                self._login_process = proc
                 
-                if self._login_process.stdout is None:
+                if proc.stdout is None:
                     raise MiHomeClientError("Stdout 管道损坏")
                 
-                async def read_stdout():
-                    nonlocal qr_found, full_buffer
-                    while True:
-                        chunk = await self._login_process.stdout.read(256)
-                        if not chunk:
-                            break
-                        text = chunk.decode('utf-8', errors='replace')
-                        
-                        # 🚀 采用滑动窗口截断，只保留最近 4096 字符，坚决阻断 OOM
-                        full_buffer = (full_buffer + text)[-4096:]
-                        
-                        if text.strip():
-                            for line in text.split('\n'):
-                                if line.strip():
-                                    logger.debug(f"[Sandbox] {line.strip()}")
-                        
-                        if not qr_found:
-                            compact = full_buffer.replace("\r", "").replace("\n", "")
-                            match = re.search(r'(https://account\.xiaomi\.com/pass/qr/login\?[^\s\'"]+)', compact)
-                            if match:
-                                url = match.group(1)
-                                if "ticket=" in url and "dc=" in url and "sid=" in url:
-                                    qr_found = True
-                                    logger.info(f"[MiHome] 成功提取完整登录链接。")
-                                    if asyncio.iscoroutinefunction(qr_callback):
-                                        await qr_callback(url)
-                                    else:
-                                        qr_callback(url)
-                
-                try:
-                    await asyncio.wait_for(asyncio.gather(self._login_process.wait(), read_stdout()), timeout=120.0)
-                except asyncio.TimeoutError:
+            async def read_stdout():
+                nonlocal qr_found, full_buffer
+                while True:
+                    chunk = await proc.stdout.read(256)
+                    if not chunk:
+                        break
+                    text = chunk.decode('utf-8', errors='replace')
+                    full_buffer = (full_buffer + text)[-4096:]
+                    
+                    if text.strip():
+                        for line in text.split('\n'):
+                            if line.strip():
+                                logger.debug(f"[Sandbox] {line.strip()}")
+                    
+                    if not qr_found:
+                        compact = full_buffer.replace("\r", "").replace("\n", "")
+                        match = re.search(r'(https://account\.xiaomi\.com/pass/qr/login\?[^\s\'"]+)', compact)
+                        if match:
+                            url = match.group(1)
+                            if "ticket=" in url and "dc=" in url and "sid=" in url:
+                                qr_found = True
+                                logger.info("[MiHome] 成功提取完整登录链接。")
+                                if asyncio.iscoroutinefunction(qr_callback):
+                                    await qr_callback(url)
+                                else:
+                                    qr_callback(url)
+            
+            try:
+                await asyncio.wait_for(asyncio.gather(proc.wait(), read_stdout()), timeout=120.0)
+            except asyncio.TimeoutError:
+                async with self._api_lock:
                     try:
-                        self._login_process.kill()
-                        await self._login_process.wait()
+                        proc.kill()
+                        await proc.wait()
                     except ProcessLookupError:
                         pass
                     except Exception:
                         pass
-                    msg = "授权确认已超时 (120秒)" if qr_found else "超时未能提取登录链接"
-                    self.data_manager.update_state(last_login_error=msg)
-                    return {"status": "timeout" if qr_found else "qrcode_not_found"}
-                
-                if self._login_process.returncode == 0:
-                    self.data_manager.update_state(last_login_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), last_login_error="")
+                msg = "授权确认已超时 (120秒)" if qr_found else "超时未能提取登录链接"
+                self.data_manager.update_state(last_login_error=msg)
+                return {"status": "timeout" if qr_found else "qrcode_not_found"}
+            
+            async with self._api_lock:
+                if proc.returncode == 0:
+                    self.data_manager.update_state(
+                        last_login_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                        last_login_error=""
+                    )
                     self.api = mijiaAPI(self.data_manager.get_auth_path())
                     return {"status": "success" if qr_found else "already_logged_in"}
                 else:
-                    # full_buffer 已被截断保护，直接去尾即可
                     err = full_buffer[-800:].strip()
                     logger.error(f"[MiHome] 沙盒异常退出: {err}")
                     self.data_manager.update_state(last_login_error=err)
@@ -159,7 +165,9 @@ class MiHomeClient:
             return {"status": "error", "message": str(e)}
         finally:
             self._login_status = LOGIN_IDLE
-            self._login_process = None
+            async with self._api_lock:
+                if self._login_process is proc:
+                    self._login_process = None
 
     async def get_devices(self) -> List[Dict[str, Any]]:
         self._check_idle()
@@ -221,7 +229,6 @@ class MiHomeClient:
             raise MiHomeClientError(str(e)) from e
 
     async def get_device_props(self, did: str) -> Dict[str, Any]:
-        """优先通过 prop_list 探测设备能力菜单，失败时回退到 get_props。"""
         try:
             async with self._api_lock:
                 await asyncio.wait_for(asyncio.to_thread(self.api.login), timeout=10.0)
@@ -338,13 +345,14 @@ class MiHomeClient:
             raise MiHomeControlError(str(e)) from e
 
     async def terminate(self):
-        if self._login_process and self._login_process.returncode is None:
-            try:
-                self._login_process.kill()
-                await self._login_process.wait()
-            except ProcessLookupError:
-                pass
-            except Exception as e:
-                logger.warning(f"[MiHome] 终止进程失败: {e}")
-        self.api = None
-        self._login_status = LOGIN_IDLE
+        async with self._api_lock:
+            if self._login_process and self._login_process.returncode is None:
+                try:
+                    self._login_process.kill()
+                    await self._login_process.wait()
+                except ProcessLookupError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"[MiHome] 终止进程失败: {e}")
+            self._login_status = LOGIN_IDLE
+            self._login_process = None
