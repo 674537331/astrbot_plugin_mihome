@@ -1,8 +1,10 @@
 {
   "device_map": {
-    "description": "米家设备别名映射 (Key: 自定义别名, Value: 设备 DID)",
-    "type": "dict",
-    "items": {},
-    "hint": "键填写您想使用的呼叫别名（如 '客厅 空调'），值填写刷新出的设备 DID（如 '646717969'）。"
+    "description": "米家设备别名映射 (需填写合法的 JSON 格式)",
+    "type": "text",
+    "editor_mode": true,
+    "editor_language": "json",
+    "default": "{\n  \"客厅 空调\": \"123456789\",\n  \"卧室 净化器\": \"987654321\"\n}",
+    "hint": "请使用 JSON 格式。键(Key)填写您想使用的呼叫别名，值(Value)填写刷新出的设备 DID。"
   }
 }
