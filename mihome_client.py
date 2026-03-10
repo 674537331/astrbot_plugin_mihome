@@ -108,7 +108,9 @@ class MiHomeClient:
                         if not chunk:
                             break
                         text = chunk.decode('utf-8', errors='replace')
-                        full_buffer += text
+                        
+                        # 🚀 采用滑动窗口截断，只保留最近 4096 字符，坚决阻断 OOM
+                        full_buffer = (full_buffer + text)[-4096:]
                         
                         if text.strip():
                             for line in text.split('\n'):
@@ -147,6 +149,7 @@ class MiHomeClient:
                     self.api = mijiaAPI(self.data_manager.get_auth_path())
                     return {"status": "success" if qr_found else "already_logged_in"}
                 else:
+                    # full_buffer 已被截断保护，直接去尾即可
                     err = full_buffer[-800:].strip()
                     logger.error(f"[MiHome] 沙盒异常退出: {err}")
                     self.data_manager.update_state(last_login_error=err)
@@ -158,15 +161,11 @@ class MiHomeClient:
             self._login_status = LOGIN_IDLE
             self._login_process = None
 
-    # 🚀 修复 Python 3.8 兼容性标注
     async def get_devices(self) -> List[Dict[str, Any]]:
         self._check_idle()
         try:
             async with self._api_lock:
-                # 🚀 新增登录鉴权超时保护
                 await asyncio.wait_for(asyncio.to_thread(self.api.login), timeout=15.0)
-                
-                # 🚀 新增自有设备拉取超时保护
                 own = await asyncio.wait_for(asyncio.to_thread(self.api.get_devices_list), timeout=20.0)
                 if not isinstance(own, list):
                     own = []
@@ -175,7 +174,6 @@ class MiHomeClient:
                 shared_error = ""
                 if hasattr(self.api, "get_shared_devices_list"):
                     try:
-                        # 🚀 新增共享设备拉取超时保护
                         shared = await asyncio.wait_for(
                             asyncio.to_thread(self.api.get_shared_devices_list), 
                             timeout=20.0
