@@ -11,7 +11,7 @@ from astrbot.api import logger, AstrBotConfig
 from .data_manager import MiHomeDataManager
 from .mihome_client import MiHomeClient, MiHomeAuthError, MiHomeControlError, MiHomeClientError
 
-@register("astrbot_plugin_mihome", "Ryan", "米家云端智能管家", "6.2.6")
+@register("astrbot_plugin_mihome", "Ryan", "米家云端智能管家", "6.2.7")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -100,10 +100,8 @@ class MiHomeControlPlugin(Star):
         res = await self.client.login(qr_callback=cb)
         s = res.get("status")
         msg = {
-            "success": "🎉 授权成功！", 
-            "timeout": "❌ 超时了。", 
-            "qrcode_not_found": "⚠️ 未能抓取到链接。", 
-            "already_logged_in": "✅ 您已登录。"
+            "success": "🎉 授权成功！", "timeout": "❌ 超时了。", 
+            "qrcode_not_found": "⚠️ 未能抓取到链接。", "already_logged_in": "✅ 您已登录。"
         }.get(s, f"❌ 错误: {res.get('message')}")
         yield event.plain_result(msg)
 
@@ -175,15 +173,16 @@ class MiHomeControlPlugin(Star):
             yield event.plain_result(f"❌ 同步失败: {e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("控制米家")
+    @filter.command("米家控制")
     async def control_mihome_device(self, event: AstrMessageEvent):
         device_map = self._parse_device_map()
         msg = event.message_str.strip()
-        cmd_prefix = r'^/?控制米家\s*'
+        # 🚀 修正前缀正则，完美贴合新命令名
+        cmd_prefix = r'^/?米家控制\s*'
         content = re.sub(cmd_prefix, '', msg).strip()
 
         if not content:
-            yield event.plain_result("❌ 缺少参数。\n格式：/控制米家 [设备名] [动作/属性] [值]")
+            yield event.plain_result("❌ 缺少参数。\n格式：/米家控制 [设备名] [动作/属性] [值]")
             return
 
         try:
@@ -199,7 +198,7 @@ class MiHomeControlPlugin(Star):
             return
 
         if not remaining_parts:
-            yield event.plain_result(f"❌ 请指定控制动作。例如：/控制米家 {alias} 开")
+            yield event.plain_result(f"❌ 请指定控制动作。例如：/米家控制 {alias} 开")
             return
 
         did = device_map[alias]
@@ -234,7 +233,7 @@ class MiHomeControlPlugin(Star):
                     yield event.plain_result(f"❌ 内部错误。")
                 return
             elif is_prop_candidate:
-                yield event.plain_result(f"❌ 缺少属性值。示例：/控制米家 {alias} {token} 26")
+                yield event.plain_result(f"❌ 缺少属性值。示例：/米家控制 {alias} {token} 26")
                 return
             else:
                 yield event.plain_result(f"❌ 不支持的动作或属性不完整: {token}")
