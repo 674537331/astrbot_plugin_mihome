@@ -1,4 +1,4 @@
-# 🌟 AstrBot MiHome Control (v6.1.0 Stable)
+# 🌟 AstrBot MiHome Control (vv6.2.7 Stable)
 
 基于 [AstrBot](https://github.com/Soulter/AstrBot) 框架开发的米家智能家居云端控制插件。
 
