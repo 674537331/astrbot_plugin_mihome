@@ -11,12 +11,14 @@ from astrbot.api import logger, AstrBotConfig
 from .data_manager import MiHomeDataManager
 from .mihome_client import MiHomeClient, MiHomeAuthError, MiHomeControlError, MiHomeClientError
 
-@register("astrbot_plugin_mihome", "Ryan", "米家云端智能管家", "6.3.2")
+PLUGIN_NAME = "astrbot_plugin_mihome"
+
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "6.3.4")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config or {}
-        self.data_manager = MiHomeDataManager("astrbot_plugin_mihome")
+        self.data_manager = MiHomeDataManager(PLUGIN_NAME)
         self.client = MiHomeClient(self.data_manager)
         
         self.action_alias = {
@@ -77,16 +79,11 @@ class MiHomeControlPlugin(Star):
         val_str = str(val).strip()
         val_lower = val_str.lower()
         
-        # 🚀 取消单行压缩风格，更加工程化
-        if val_lower == "true":
-            return True
-        if val_lower == "false":
-            return False
+        if val_lower == "true": return True
+        if val_lower == "false": return False
             
-        if re.match(r'^-?\d+$', val_str):
-            return int(val_str)
-        if re.match(r'^-?\d+\.\d+$', val_str):
-            return float(val_str)
+        if re.match(r'^-?\d+$', val_str): return int(val_str)
+        if re.match(r'^-?\d+\.\d+$', val_str): return float(val_str)
             
         return val_str
 
@@ -104,9 +101,7 @@ class MiHomeControlPlugin(Star):
     @filter.command("米家登录")
     async def mihome_login(self, event: AstrMessageEvent):
         yield event.plain_result("⏳ 正在拉起独立沙盒环境...")
-        
         async def cb(url): 
-            # 🚀 回调异常包裹，防止网络瞬断带崩整个授权协程
             try:
                 await event.send(event.plain_result(f"🔔 请使用米家APP扫码授权：\n\n{url}"))
             except Exception as e:
@@ -115,8 +110,11 @@ class MiHomeControlPlugin(Star):
         res = await self.client.login(qr_callback=cb)
         s = res.get("status")
         msg = {
-            "success": "🎉 授权成功！", "timeout": "❌ 超时了。", 
-            "qrcode_not_found": "⚠️ 未能抓取到链接。", "already_logged_in": "✅ 您已登录。"
+            "success": "🎉 授权成功！", 
+            "timeout": "❌ 超时了。", 
+            "qrcode_not_found": "⚠️ 未能抓取到链接。", 
+            "already_logged_in": "✅ 您已登录。",
+            "in_progress": "⚠️ 登录流程正在进行中，请稍候。"
         }.get(s, f"❌ 错误: {res.get('message')}")
         yield event.plain_result(msg)
 
@@ -289,6 +287,7 @@ class MiHomeControlPlugin(Star):
                 yield event.plain_result(f"❌ 不支持的动作或属性不完整: {token}")
                 return
 
+        # 高级属性透传链路
         raw_prop = remaining_parts[0]
         raw_val_str = " ".join(remaining_parts[1:])
         
