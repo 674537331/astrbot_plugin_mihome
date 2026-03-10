@@ -11,7 +11,7 @@ from astrbot.api import logger, AstrBotConfig
 from .data_manager import MiHomeDataManager
 from .mihome_client import MiHomeClient, MiHomeAuthError, MiHomeControlError, MiHomeClientError
 
-@register("astrbot_plugin_mihome", "Ryan", "米家云端智能管家", "6.2.7")
+@register("astrbot_plugin_mihome", "Ryan", "米家云端智能管家", "6.2.9")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -53,12 +53,10 @@ class MiHomeControlPlugin(Star):
         if not parts:
             return None, []
 
-        # 阶段 1：优先匹配 shlex 解析后的完整别名 token
         exact_alias = parts[0]
         if exact_alias in device_map:
             return exact_alias, parts[1:]
 
-        # 阶段 2：回退到最长 split 前缀匹配
         best_alias = None
         best_len = 0
         for alias in device_map.keys():
@@ -96,7 +94,7 @@ class MiHomeControlPlugin(Star):
     async def mihome_login(self, event: AstrMessageEvent):
         yield event.plain_result("⏳ 正在拉起独立沙盒环境...")
         async def cb(url): 
-            await event.send(MessageEventResult().message(f"🔔 请扫码授权：\n\n{url}"))
+            await event.send(event.plain_result(f"🔔 请使用米家APP扫码授权：\n\n{url}"))
         res = await self.client.login(qr_callback=cb)
         s = res.get("status")
         msg = {
@@ -162,22 +160,23 @@ class MiHomeControlPlugin(Star):
                             menu = f"探测异常 ({props['__error__']})"
                         else:
                             menu = ", ".join(props.keys()) if props else "未探测到属性"
-                        res.append(f"{i}. 【{alias_str}】({name}) [{status_icon}]\n   └─ 🔎 探测属性: {menu}")
+                        res.append(f"{i}. 【{alias_str}】({name}) [{status_icon}] ({did_str})\n   └─ 🔎 探测属性: {menu}")
                     else:
-                        res.append(f"{i}. 【{alias_str}】({name}) [{status_icon}]\n   └─ 💤 设备离线，跳过属性探测")
+                        res.append(f"{i}. 【{alias_str}】({name}) [{status_icon}] ({did_str})\n   └─ 💤 设备离线，跳过属性探测")
                 else:
-                    res.append(f"{i}. 【未配置别名】({name}) [{status_icon}]")
+                    res.append(f"{i}. 【未配置别名】({name}) [{status_icon}] ({did_str})")
                     
             yield event.plain_result("\n".join(res))
+        except MiHomeClientError as e:
+            yield event.plain_result(f"❌ 同步设备失败: {e}")
         except Exception as e:
-            yield event.plain_result(f"❌ 同步失败: {e}")
+            yield event.plain_result(f"❌ 未知同步异常: {e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家控制")
     async def control_mihome_device(self, event: AstrMessageEvent):
         device_map = self._parse_device_map()
         msg = event.message_str.strip()
-        # 🚀 修正前缀正则，完美贴合新命令名
         cmd_prefix = r'^/?米家控制\s*'
         content = re.sub(cmd_prefix, '', msg).strip()
 
