@@ -1,10 +1,8 @@
 {
   "device_map": {
-    "type": "text",
-    "description": "设备别名与 DID 映射表 (JSON)",
-    "hint": "填写设备别名与对应 DID 的映射关系，用于简化控制指令。\n示例:\n{\n  \"净化器\": \"685609385\",\n  \"落地扇\": \"740409322\"\n}",
-    "default": "{}",
-    "editor_mode": true,
-    "editor_language": "json"
+    "description": "米家设备别名映射 (Key: 自定义别名, Value: 设备 DID)",
+    "type": "dict",
+    "items": {},
+    "hint": "键填写您想使用的呼叫别名（如 '客厅 空调'），值填写刷新出的设备 DID（如 '646717969'）。"
   }
 }
