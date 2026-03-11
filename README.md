@@ -2,7 +2,7 @@
 
 基于 [AstrBot](https://github.com/Soulter/AstrBot) 框架开发的米家智能家居云端控制插件。
 
-旨在为用户提供**最安全、最直观、极度鲁棒**的米家设备控制体验。
+旨在为用户提供**最安全、最直观**的米家设备控制体验。
 
 <div align="center">
 
