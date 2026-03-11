@@ -15,7 +15,7 @@ from .device_profiles import get_device_prop_map, get_device_val_map, get_device
 
 PLUGIN_NAME = "astrbot_plugin_mihome"
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "6.3.11")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "6.3.13")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -160,7 +160,6 @@ class MiHomeControlPlugin(Star):
         state = self.data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
         
-        # 🚀 详情增强流：严格的硬拦截，防止展示层崩溃退化
         if did not in did_to_name:
             yield event.plain_result(f"⚠️ 尚未同步【{alias}】的底层设备档案。\n💡 请先发送一次 /刷新米家，系统将自动加载该设备的专属物模型面板。")
             return
@@ -173,9 +172,8 @@ class MiHomeControlPlugin(Star):
             props_data = await self.client.get_device_props(did)
             if props_data.get("__error__"):
                 yield event.plain_result(f"❌ 读取异常: {props_data['__error__']}")
-            elif not props_data or (not props_data.get("writable") and not props_data.get("readable")):
-                yield event.plain_result(f"⚠️ 【{alias}】未探测到公开的属性或状态。")
             else:
+                # 🚀 彻底移除旧版的 elif not props_data 短路判断，统一靠 msg_lines 判断
                 msg_lines = []
                 
                 display_map = get_device_display_map(official_name)
@@ -194,7 +192,7 @@ class MiHomeControlPlugin(Star):
                     
                 readables = props_data.get("readable", {})
                 if readables:
-                    if writables: msg_lines.append("") 
+                    if msg_lines: msg_lines.append("") 
                     msg_lines.append(f"📊 目前的工作状态:")
                     
                     translated_items = []
@@ -206,7 +204,24 @@ class MiHomeControlPlugin(Star):
                     for name, val in translated_items:
                         msg_lines.append(f" ├─ {name}: {val}")
                         
-                yield event.plain_result("\n".join(msg_lines))
+                readable_keys = props_data.get("readable_keys", [])
+                if readable_keys:
+                    if msg_lines: msg_lines.append("") 
+                    msg_lines.append(f"📡 已知状态项 (当前实况获取失败或无数据):")
+                    
+                    translated_keys = [display_map.get(k, k) for k in readable_keys]
+                    translated_keys.sort()
+                    shown_keys = translated_keys[:40]
+                    keys_str = ", ".join(shown_keys)
+                    if len(translated_keys) > 40:
+                        keys_str += f" ... 共{len(translated_keys)}项"
+                    msg_lines.append(keys_str)
+
+                # 🚀 终极判断：只要有任何一个分类有数据，就展示；全空才报错。
+                if not msg_lines:
+                    yield event.plain_result(f"⚠️ 【{alias}】未探测到公开的属性或状态。")
+                else:
+                    yield event.plain_result("\n".join(msg_lines))
                 
         except Exception as e:
             logger.error(f"[MiHome] 获取属性异常: {e}")
@@ -244,7 +259,6 @@ class MiHomeControlPlugin(Star):
         state = self.data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
         
-        # 🚀 控制核心流：柔性降级 + 友好提示（不阻断操作）
         official_name = did_to_name.get(did)
         if not official_name:
             logger.info(f"[MiHome] 设备 {did} 缺少官方名缓存，控制链路回退到通用模式。")
