@@ -11,11 +11,20 @@ from astrbot.api import logger, AstrBotConfig
 from .data_manager import MiHomeDataManager
 from .mihome_client import MiHomeClient, MiHomeAuthError, MiHomeControlError, MiHomeClientError
 
-from .device_profiles import get_device_prop_map, get_device_val_map, get_device_display_map, get_reverse_prop_map
+from .device_profiles import (
+    get_device_prop_map, 
+    get_device_val_map, 
+    get_device_display_map, 
+    get_reverse_prop_map,
+    get_device_detail_writable_keys,
+    get_device_detail_readable_keys,
+    get_device_help_examples,
+    get_device_help_hints # 引入防二义性值域提示
+)
 
 PLUGIN_NAME = "astrbot_plugin_mihome"
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "6.3.13")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "6.3.11")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -129,7 +138,7 @@ class MiHomeControlPlugin(Star):
                 alias_str = "/".join(aliases) if aliases else "未配置别名"
                 res.append(f"{i}. 【{alias_str}】({name}) [{status_icon}] ({did_str})")
                 
-            res.append("\n💡 提示: 发送 /米家详情 [别名] 可查看设备的详细工作状态。")
+            res.append("\n💡 提示: 发送 /米家详情 [别名] 可查看设备实况，或发送 /米家帮助 [别名] 获取控制示例。")
             yield event.plain_result("\n".join(res))
         except MiHomeClientError as e: yield event.plain_result(f"❌ 同步设备失败: {e}")
         except Exception as e: yield event.plain_result(f"❌ 未知同步异常: {e}")
@@ -150,13 +159,11 @@ class MiHomeControlPlugin(Star):
         except Exception: parts = content.split()
 
         alias, _ = self._match_device_alias(parts, device_map)
-        
         if not alias:
-            yield event.plain_result("❌ 找不到对应的设备别名。\n⚠️ 为了保障安全，未配置别名的设备不支持查看详情。\n💡 请先通过 /刷新米家 获取 DID，并在 WebUI 插件设置中为其绑定一个好记的别名。")
+            yield event.plain_result("❌ 找不到对应的设备别名。\n💡 请先通过 /刷新米家 获取 DID，并在 WebUI 插件设置中为其绑定一个好记的别名。")
             return
 
         did = device_map[alias]
-        
         state = self.data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
         
@@ -165,67 +172,151 @@ class MiHomeControlPlugin(Star):
             return
             
         official_name = did_to_name[did]
-
-        yield event.plain_result(f"⏳ 正在读取【{alias}】的能力菜单与实况数据...")
+        
+        display_map = get_device_display_map(official_name)
+        reverse_prop_map = get_reverse_prop_map(official_name)
+        fallback_writables = get_device_detail_writable_keys(official_name)
+        fallback_readables = get_device_detail_readable_keys(official_name)
+        
+        stage1_lines = [f"📖 【{alias}】本地设备画像:"]
+        
+        if fallback_writables:
+            translated_writables = [reverse_prop_map.get(w, w) for w in fallback_writables]
+            translated_writables.sort()
+            stage1_lines.append(f"✅ 可调属性: " + ", ".join(translated_writables))
+            
+        if fallback_readables:
+            translated_readables = [display_map.get(k, k) for k in fallback_readables]
+            translated_readables.sort()
+            stage1_lines.append(f"📡 状态传感: " + ", ".join(translated_readables))
+            
+        stage1_lines.append(f"\n⏳ 正在向米家云端请求实时数据，请稍候...")
+        
+        yield event.plain_result("\n".join(stage1_lines))
 
         try:
             props_data = await self.client.get_device_props(did)
-            if props_data.get("__error__"):
-                yield event.plain_result(f"❌ 读取异常: {props_data['__error__']}")
+            error_msg = props_data.get("__error__")
+            
+            stage2_lines = []
+            
+            if error_msg:
+                stage2_lines.append(f"⚠️ 【{alias}】实况拉取失败:")
+                stage2_lines.append(f" └─ 该设备通常支持上述状态项，但目前可能离线或休眠，暂无法读取实时数值。")
+                stage2_lines.append(f" └─ 原因: {error_msg}")
             else:
-                # 🚀 彻底移除旧版的 elif not props_data 短路判断，统一靠 msg_lines 判断
-                msg_lines = []
-                
-                display_map = get_device_display_map(official_name)
-                reverse_prop_map = get_reverse_prop_map(official_name)
-                
-                writables = props_data.get("writable", [])
-                if writables:
-                    msg_lines.append(f"✅ 【{alias}】支持的高级调整属性:")
-                    translated_writables = [reverse_prop_map.get(w, w) for w in writables]
-                    translated_writables.sort()
-                    shown = translated_writables[:40]
-                    prop_list_str = ", ".join(shown)
-                    if len(translated_writables) > 40:
-                        prop_list_str += f" ... 共{len(translated_writables)}项"
-                    msg_lines.append(prop_list_str)
-                    
                 readables = props_data.get("readable", {})
+                cloud_writables = set(props_data.get("writable", []))
+                readable_keys = props_data.get("readable_keys", [])
+                
+                # 渲染正常实况数据
                 if readables:
-                    if msg_lines: msg_lines.append("") 
-                    msg_lines.append(f"📊 目前的工作状态:")
-                    
+                    stage2_lines.append(f"📊 【{alias}】实时状态:")
                     translated_items = []
                     for k, v in readables.items():
                         friendly_name = display_map.get(k, k)
                         translated_items.append((friendly_name, v))
-                        
                     translated_items.sort(key=lambda x: x[0])
                     for name, val in translated_items:
-                        msg_lines.append(f" ├─ {name}: {val}")
+                        stage2_lines.append(f" ├─ {name}: {val}")
                         
-                readable_keys = props_data.get("readable_keys", [])
+                # 🚀 痛点 4 补全：把没拿到数据的已知状态项渲染出来
                 if readable_keys:
-                    if msg_lines: msg_lines.append("") 
-                    msg_lines.append(f"📡 已知状态项 (当前实况获取失败或无数据):")
-                    
+                    if stage2_lines: stage2_lines.append("")
+                    stage2_lines.append(f"📡 已知状态项 (当前暂无数据):")
                     translated_keys = [display_map.get(k, k) for k in readable_keys]
                     translated_keys.sort()
-                    shown_keys = translated_keys[:40]
-                    keys_str = ", ".join(shown_keys)
+                    keys_str = ", ".join(translated_keys[:40])
                     if len(translated_keys) > 40:
                         keys_str += f" ... 共{len(translated_keys)}项"
-                    msg_lines.append(keys_str)
+                    stage2_lines.append(" └─ " + keys_str)
+                
+                # 🚀 注意点 2 优化：翻译未知能力
+                new_discovered_writables = cloud_writables - set(fallback_writables)
+                if new_discovered_writables:
+                    if stage2_lines: stage2_lines.append("")
+                    stage2_lines.append(f"🔍 云端嗅探到的未知可控能力:")
+                    translated_unknown = [reverse_prop_map.get(k, k) for k in new_discovered_writables]
+                    translated_unknown.sort()
+                    stage2_lines.append(" └─ " + ", ".join(translated_unknown))
+                
+                if not stage2_lines:
+                    stage2_lines.append(f"✅ 【{alias}】在线就绪，但当前无实况数据返回。")
 
-                # 🚀 终极判断：只要有任何一个分类有数据，就展示；全空才报错。
-                if not msg_lines:
-                    yield event.plain_result(f"⚠️ 【{alias}】未探测到公开的属性或状态。")
-                else:
-                    yield event.plain_result("\n".join(msg_lines))
+            yield event.plain_result("\n".join(stage2_lines))
                 
         except Exception as e:
             logger.error(f"[MiHome] 获取属性异常: {e}")
-            yield event.plain_result(f"❌ 获取异常: {e}")
+            yield event.plain_result(f"❌ 内部处理异常: {e}")
+
+    # ==============================================================================
+    # 🚀 注意点 1：改名 /米家帮助 规避前缀冲突
+    # ==============================================================================
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("米家帮助")
+    async def mihome_control_help(self, event: AstrMessageEvent):
+        device_map = self._parse_device_map()
+        msg = event.message_str.strip()
+        cmd_prefix = r'^/?米家帮助\s*'
+        content = re.sub(cmd_prefix, '', msg).strip()
+
+        if not content:
+            yield event.plain_result("❌ 缺少参数。\n格式：/米家帮助 [设备别名]\n示例：/米家帮助 净化器")
+            return
+
+        try: parts = shlex.split(content)
+        except Exception: parts = content.split()
+
+        alias, _ = self._match_device_alias(parts, device_map)
+        if not alias:
+            yield event.plain_result("❌ 找不到对应的设备别名。\n💡 请先通过 /刷新米家 获取 DID，并在 WebUI 插件设置中为其绑定一个好记的别名。")
+            return
+
+        did = device_map[alias]
+        state = self.data_manager.load_state()
+        did_to_name = state.get("did_to_name", {})
+        
+        # 🚀 痛点 3 补全：无缓存时的通用兜底帮助
+        if did not in did_to_name:
+            yield event.plain_result(
+                f"⚠️ 尚未同步【{alias}】的专属控制指南，以下为通用控制格式：\n\n"
+                f"基础开关:\n- /米家控制 {alias} 开\n- /米家控制 {alias} 关\n\n"
+                f"高级格式:\n- /米家控制 {alias} [属性] [值]\n\n"
+                f"💡 建议先发送 /刷新米家 获取该设备更精准的专属示例。"
+            )
+            return
+            
+        official_name = did_to_name[did]
+        reverse_prop_map = get_reverse_prop_map(official_name)
+        fallback_writables = get_device_detail_writable_keys(official_name)
+        help_examples = get_device_help_examples(official_name)
+        help_hints = get_device_help_hints(official_name)
+
+        msg_lines = []
+        
+        # 🚀 痛点 1 补全：属性总览
+        if fallback_writables:
+            translated_writables = [reverse_prop_map.get(w, w) for w in fallback_writables]
+            translated_writables.sort()
+            msg_lines.append(f"✅ 【{alias}】支持控制的属性:\n" + ", ".join(translated_writables) + "\n")
+
+        msg_lines.append(f"常用控制示例:")
+        msg_lines.append(f"- /米家控制 {alias} 开")
+        msg_lines.append(f"- /米家控制 {alias} 关")
+
+        advanced_props = [k for k in fallback_writables if k != "on"]
+        if advanced_props:
+            if help_examples:
+                for prop_cn, vals in help_examples.items():
+                    for val in vals:
+                        hint_str = f"  ({help_hints[prop_cn]})" if prop_cn in help_hints and val == vals[0] else ""
+                        msg_lines.append(f"- /米家控制 {alias} {prop_cn} {val}{hint_str}")
+            else:
+                for eng_k in advanced_props:
+                    prop_cn = reverse_prop_map.get(eng_k, eng_k)
+                    msg_lines.append(f"- /米家控制 {alias} {prop_cn} [对应值]")
+                    
+        yield event.plain_result("\n".join(msg_lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家控制")
@@ -247,15 +338,15 @@ class MiHomeControlPlugin(Star):
         alias, remaining_parts = self._match_device_alias(parts, device_map)
         
         if not alias:
-            yield event.plain_result("❌ 找不到对应的设备别名。\n⚠️ 为了保障安全与精确性，未配置别名的设备不支持远程控制。\n💡 请先通过 /刷新米家 获取 DID，并在 WebUI 插件设置中为其绑定一个好记的别名。")
+            yield event.plain_result("❌ 找不到对应的设备别名。\n💡 请先通过 /刷新米家 获取 DID，并在 WebUI 中为其绑定别名。")
             return
             
         if not remaining_parts:
-            yield event.plain_result(f"❌ 请指定控制动作。例如：/米家控制 {alias} 开")
+            # 🚀 痛点 2 解决：所有失败抛出处，全部加上回流引导
+            yield event.plain_result(f"❌ 请指定控制动作。\n💡 提示: 发送 /米家帮助 {alias} 查看该设备的控制范例。")
             return
 
         did = device_map[alias]
-        
         state = self.data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
         
@@ -288,16 +379,17 @@ class MiHomeControlPlugin(Star):
                 except MiHomeControlError as e:
                     err = str(e)
                     if err == "device_not_found": yield event.plain_result("❌ 云端找不到设备或权限受限。")
-                    elif err == "device_rejected": yield event.plain_result("❌ 设备在线但拒绝了请求。")
+                    elif err == "device_rejected": yield event.plain_result(f"❌ 设备在线但拒绝了请求。\n💡 提示: 发送 /米家帮助 {alias} 检查指令是否越界。")
                     else: yield event.plain_result(f"❌ 控制失败: {err}")
                 except MiHomeClientError as e: yield event.plain_result(f"❌ API/网络异常: {e}")
                 except Exception: yield event.plain_result(f"❌ 内部错误。")
                 return
             elif is_prop_candidate:
-                yield event.plain_result(f"❌ 缺少属性值。示例：/米家控制 {alias} {token} 26")
+                # 回流引导
+                yield event.plain_result(f"❌ 缺少属性值。\n💡 提示: 发送 /米家帮助 {alias} 查看该设备的控制范例。")
                 return
             else:
-                yield event.plain_result(f"❌ 不支持的动作或属性不完整: {token}")
+                yield event.plain_result(f"❌ 不支持的动作或属性不完整: {token}\n💡 提示: 发送 /米家帮助 {alias} 查看支持的控制指令。")
                 return
 
         raw_prop = remaining_parts[0]
@@ -320,7 +412,7 @@ class MiHomeControlPlugin(Star):
         except MiHomeControlError as e:
             err = str(e)
             if err == "device_not_found": yield event.plain_result("❌ 云端找不到设备。")
-            elif err == "device_rejected": yield event.plain_result("❌ 设备拒绝请求 (请检查你输入的值是否超出了设备允许的范围)。")
+            elif err == "device_rejected": yield event.plain_result(f"❌ 设备拒绝请求 (可能值越界或为只读属性)。\n💡 提示: 发送 /米家帮助 {alias} 检查正确用法。")
             else: yield event.plain_result(f"❌ 设置失败: {err}")
         except MiHomeClientError as e: yield event.plain_result(f"❌ API/网络异常: {e}")
         except Exception: yield event.plain_result(f"❌ 内部错误。")
