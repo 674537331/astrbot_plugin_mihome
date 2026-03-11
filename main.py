@@ -11,9 +11,11 @@ from astrbot.api import logger, AstrBotConfig
 from .data_manager import MiHomeDataManager
 from .mihome_client import MiHomeClient, MiHomeAuthError, MiHomeControlError, MiHomeClientError
 
+from .device_profiles import get_device_prop_map, get_device_val_map, get_device_display_map, get_reverse_prop_map
+
 PLUGIN_NAME = "astrbot_plugin_mihome"
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "6.3.4")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "6.3.11")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -25,39 +27,22 @@ class MiHomeControlPlugin(Star):
             "开": True, "开启": True, "打开": True, "on": True, 
             "关": False, "关闭": False, "off": False
         }
-        
-        self.prop_alias = {
-            "温度": "target_temperature", "环境温度": "temperature",
-            "风速": "fan_level", "风量": "motor_speed",
-            "模式": "mode", "亮度": "brightness", "颜色": "color"
-        }
-        
-        self.val_alias = {
-            "制冷": "cool", "制热": "heat", "送风": "fan", "除湿": "dry",
-            "睡眠": "sleep", "自动": "auto", "静音": "silent",
-            "低": "low", "中": "medium", "高": "high",
-            "低档": 1, "中档": 2, "高档": 3,
-            "一档": 1, "二档": 2, "三档": 3
-        }
 
     def _parse_device_map(self) -> Dict[str, str]:
         raw = self.config.get("device_map", "{}")
         try:
             parsed = json.loads(raw) if isinstance(raw, str) else raw
-            if not isinstance(parsed, dict):
-                return {}
+            if not isinstance(parsed, dict): return {}
             return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(v).strip()}
         except Exception as e:
             logger.warning(f"[MiHome] device_map 解析失败: {e}")
             return {}
 
     def _match_device_alias(self, parts: List[str], device_map: Dict[str, str]) -> Tuple[Optional[str], List[str]]:
-        if not parts:
-            return None, []
+        if not parts: return None, []
 
         exact_alias = parts[0]
-        if exact_alias in device_map:
-            return exact_alias, parts[1:]
+        if exact_alias in device_map: return exact_alias, parts[1:]
 
         best_alias = None
         best_len = 0
@@ -67,45 +52,28 @@ class MiHomeControlPlugin(Star):
                 best_alias = alias
                 best_len = len(alias_parts)
 
-        if not best_alias:
-            return None, parts
-
+        if not best_alias: return None, parts
         return best_alias, parts[best_len:]
 
     def _parse_value(self, val: Any) -> Any:
-        if isinstance(val, (int, float, bool)):
-            return val
-        
+        if isinstance(val, (int, float, bool)): return val
         val_str = str(val).strip()
         val_lower = val_str.lower()
         
         if val_lower == "true": return True
         if val_lower == "false": return False
-            
         if re.match(r'^-?\d+$', val_str): return int(val_str)
         if re.match(r'^-?\d+\.\d+$', val_str): return float(val_str)
             
         return val_str
-
-    def _normalize_prop_keys(self, keys: List[str]) -> List[str]:
-        normalized = {}
-        for key in keys:
-            k = str(key).strip()
-            if not k:
-                continue
-            snake = k.replace("-", "_")
-            normalized[snake] = snake
-        return list(normalized.keys())
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登录")
     async def mihome_login(self, event: AstrMessageEvent):
         yield event.plain_result("⏳ 正在拉起独立沙盒环境...")
         async def cb(url): 
-            try:
-                await event.send(event.plain_result(f"🔔 请使用米家APP扫码授权：\n\n{url}"))
-            except Exception as e:
-                logger.error(f"[MiHome] 往客户端推送授权链接失败: {e}")
+            try: await event.send(event.plain_result(f"🔔 请使用米家APP扫码授权：\n\n{url}"))
+            except Exception as e: logger.error(f"[MiHome] 往客户端推送授权链接失败: {e}")
                 
         res = await self.client.login(qr_callback=cb)
         s = res.get("status")
@@ -123,11 +91,7 @@ class MiHomeControlPlugin(Star):
     async def mihome_status(self, event: AstrMessageEvent):
         s = await self.client.get_login_status()
         last_device = s['last_control_device'] or '无'
-        if not s['last_control_device']:
-            last_result = '未发生'
-        else:
-            last_result = '失败' if s['last_control_error'] else '成功'
-            
+        last_result = '未发生' if not s['last_control_device'] else ('失败' if s['last_control_error'] else '成功')
         yield event.plain_result(
             f"📊 状态报告：\n- 凭证存在: {s['auth_exists']}\n- 登录异常: {s['last_login_error'] or '无'}\n"
             f"- 共享异常: {s['last_shared_error'] or '无'}\n- 最近控制: {last_device} ({last_result})"
@@ -139,10 +103,7 @@ class MiHomeControlPlugin(Star):
         yield event.plain_result("⏳ 正在登出...")
         try:
             ok = await self.client.logout()
-            if ok:
-                yield event.plain_result("✅ 登出成功，凭证及状态已重置。")
-            else:
-                yield event.plain_result("⚠️ 凭证不存在，已重置现场。")
+            yield event.plain_result("✅ 登出成功，凭证及状态已重置。" if ok else "⚠️ 凭证不存在，已重置现场。")
         except Exception as e:
             logger.error(f"[MiHome] 登出失败: {e}")
             yield event.plain_result(f"❌ 登出异常: {e}")
@@ -166,16 +127,12 @@ class MiHomeControlPlugin(Star):
                 
                 aliases = [k for k, v in device_map.items() if str(v).strip() == did_str]
                 alias_str = "/".join(aliases) if aliases else "未配置别名"
-                
                 res.append(f"{i}. 【{alias_str}】({name}) [{status_icon}] ({did_str})")
                 
-            res.append("\n💡 提示: 发送 /米家详情 [别名] 可查看设备的详细属性菜单。")
+            res.append("\n💡 提示: 发送 /米家详情 [别名] 可查看设备的详细工作状态。")
             yield event.plain_result("\n".join(res))
-            
-        except MiHomeClientError as e:
-            yield event.plain_result(f"❌ 同步设备失败: {e}")
-        except Exception as e:
-            yield event.plain_result(f"❌ 未知同步异常: {e}")
+        except MiHomeClientError as e: yield event.plain_result(f"❌ 同步设备失败: {e}")
+        except Exception as e: yield event.plain_result(f"❌ 未知同步异常: {e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家详情")
@@ -186,37 +143,71 @@ class MiHomeControlPlugin(Star):
         content = re.sub(cmd_prefix, '', msg).strip()
 
         if not content:
-            yield event.plain_result("❌ 缺少参数。\n格式：/米家详情 [设备别名]\n示例：/米家详情 空调")
+            yield event.plain_result("❌ 缺少参数。\n格式：/米家详情 [设备别名]\n示例：/米家详情 净化器")
             return
 
-        try:
-            parts = shlex.split(content)
-        except Exception:
-            parts = content.split()
+        try: parts = shlex.split(content)
+        except Exception: parts = content.split()
 
         alias, _ = self._match_device_alias(parts, device_map)
         
         if not alias:
-            yield event.plain_result(f"❌ 找不到对应设备。请检查 WebUI 中的别名配置。")
+            yield event.plain_result("❌ 找不到对应的设备别名。\n⚠️ 为了保障安全，未配置别名的设备不支持查看详情。\n💡 请先通过 /刷新米家 获取 DID，并在 WebUI 插件设置中为其绑定一个好记的别名。")
             return
 
         did = device_map[alias]
-        yield event.plain_result(f"⏳ 正在探测【{alias}】的能力菜单...")
+        
+        state = self.data_manager.load_state()
+        did_to_name = state.get("did_to_name", {})
+        
+        # 🚀 详情增强流：严格的硬拦截，防止展示层崩溃退化
+        if did not in did_to_name:
+            yield event.plain_result(f"⚠️ 尚未同步【{alias}】的底层设备档案。\n💡 请先发送一次 /刷新米家，系统将自动加载该设备的专属物模型面板。")
+            return
+            
+        official_name = did_to_name[did]
+
+        yield event.plain_result(f"⏳ 正在读取【{alias}】的能力菜单与实况数据...")
 
         try:
-            props = await self.client.get_device_props(did)
-            if props.get("__error__"):
-                yield event.plain_result(f"❌ 探测异常: {props['__error__']}")
+            props_data = await self.client.get_device_props(did)
+            if props_data.get("__error__"):
+                yield event.plain_result(f"❌ 读取异常: {props_data['__error__']}")
+            elif not props_data or (not props_data.get("writable") and not props_data.get("readable")):
+                yield event.plain_result(f"⚠️ 【{alias}】未探测到公开的属性或状态。")
             else:
-                if not props:
-                    yield event.plain_result(f"⚠️ 【{alias}】未探测到公开属性。")
-                else:
-                    prop_keys = self._normalize_prop_keys(list(props.keys()))
-                    shown = prop_keys[:40]
+                msg_lines = []
+                
+                display_map = get_device_display_map(official_name)
+                reverse_prop_map = get_reverse_prop_map(official_name)
+                
+                writables = props_data.get("writable", [])
+                if writables:
+                    msg_lines.append(f"✅ 【{alias}】支持的高级调整属性:")
+                    translated_writables = [reverse_prop_map.get(w, w) for w in writables]
+                    translated_writables.sort()
+                    shown = translated_writables[:40]
                     prop_list_str = ", ".join(shown)
-                    if len(prop_keys) > 40:
-                        prop_list_str += f" ... 共{len(prop_keys)}项"
-                    yield event.plain_result(f"✅ 【{alias}】支持的高级属性:\n{prop_list_str}")
+                    if len(translated_writables) > 40:
+                        prop_list_str += f" ... 共{len(translated_writables)}项"
+                    msg_lines.append(prop_list_str)
+                    
+                readables = props_data.get("readable", {})
+                if readables:
+                    if writables: msg_lines.append("") 
+                    msg_lines.append(f"📊 目前的工作状态:")
+                    
+                    translated_items = []
+                    for k, v in readables.items():
+                        friendly_name = display_map.get(k, k)
+                        translated_items.append((friendly_name, v))
+                        
+                    translated_items.sort(key=lambda x: x[0])
+                    for name, val in translated_items:
+                        msg_lines.append(f" ├─ {name}: {val}")
+                        
+                yield event.plain_result("\n".join(msg_lines))
+                
         except Exception as e:
             logger.error(f"[MiHome] 获取属性异常: {e}")
             yield event.plain_result(f"❌ 获取异常: {e}")
@@ -233,30 +224,45 @@ class MiHomeControlPlugin(Star):
             yield event.plain_result("❌ 缺少参数。\n格式：/米家控制 [设备名] [动作/属性] [值]\n示例：\n/米家控制 空调 开\n/米家控制 空调 温度 26")
             return
 
-        try:
-            parts = shlex.split(content)
+        try: parts = shlex.split(content)
         except Exception as e:
-            logger.warning(f"[MiHome] shlex解析异常，回退普通分割: {e}")
+            logger.warning(f"[MiHome] shlex解析异常: {e}")
             parts = content.split()
 
         alias, remaining_parts = self._match_device_alias(parts, device_map)
         
         if not alias:
-            yield event.plain_result(f"❌ 找不到对应设备。请检查 WebUI 中的别名配置。")
+            yield event.plain_result("❌ 找不到对应的设备别名。\n⚠️ 为了保障安全与精确性，未配置别名的设备不支持远程控制。\n💡 请先通过 /刷新米家 获取 DID，并在 WebUI 插件设置中为其绑定一个好记的别名。")
             return
-
+            
         if not remaining_parts:
             yield event.plain_result(f"❌ 请指定控制动作。例如：/米家控制 {alias} 开")
             return
 
         did = device_map[alias]
+        
+        state = self.data_manager.load_state()
+        did_to_name = state.get("did_to_name", {})
+        
+        # 🚀 控制核心流：柔性降级 + 友好提示（不阻断操作）
+        official_name = did_to_name.get(did)
+        if not official_name:
+            logger.info(f"[MiHome] 设备 {did} 缺少官方名缓存，控制链路回退到通用模式。")
+            official_name = alias
+            yield event.plain_result(
+                f"⚠️ 尚未同步【{alias}】的专属设备档案，本次将以通用模式尝试控制。\n"
+                f"💡 如需更准确的中文指令映射，建议稍后发送一次 /刷新米家"
+            )
+
+        prop_map = get_device_prop_map(official_name)
+        val_map = get_device_val_map(official_name)
 
         if len(remaining_parts) == 1:
             token = remaining_parts[0]
             token_lower = token.lower()
             
-            prop_values_lower = {str(v).lower() for v in self.prop_alias.values()}
-            prop_alias_norm = {str(k).strip().lower(): v for k, v in self.prop_alias.items()}
+            prop_values_lower = {str(v).lower() for v in prop_map.values()}
+            prop_alias_norm = {str(k).strip().lower(): v for k, v in prop_map.items()}
             is_prop_candidate = (token_lower in prop_alias_norm) or (token_lower in prop_values_lower)
 
             if token_lower in self.action_alias:
@@ -264,21 +270,14 @@ class MiHomeControlPlugin(Star):
                 try:
                     await self.client.control_power(did, self.action_alias[token_lower], alias)
                     yield event.plain_result("✅ 成功！")
-                except MiHomeAuthError: 
-                    yield event.plain_result("❌ 鉴权失效，请重新登录。")
+                except MiHomeAuthError: yield event.plain_result("❌ 鉴权失效，请重新登录。")
                 except MiHomeControlError as e:
                     err = str(e)
-                    if err == "device_not_found": 
-                        yield event.plain_result("❌ 云端找不到设备或权限受限。")
-                    elif err == "device_rejected": 
-                        yield event.plain_result("❌ 设备在线但拒绝了请求。")
-                    else: 
-                        yield event.plain_result(f"❌ 控制失败: {err}")
-                except MiHomeClientError as e: 
-                    yield event.plain_result(f"❌ API/网络异常: {e}")
-                except Exception as e:
-                    logger.error(f"[MiHome] 控制未知异常: {e}")
-                    yield event.plain_result(f"❌ 内部错误。")
+                    if err == "device_not_found": yield event.plain_result("❌ 云端找不到设备或权限受限。")
+                    elif err == "device_rejected": yield event.plain_result("❌ 设备在线但拒绝了请求。")
+                    else: yield event.plain_result(f"❌ 控制失败: {err}")
+                except MiHomeClientError as e: yield event.plain_result(f"❌ API/网络异常: {e}")
+                except Exception: yield event.plain_result(f"❌ 内部错误。")
                 return
             elif is_prop_candidate:
                 yield event.plain_result(f"❌ 缺少属性值。示例：/米家控制 {alias} {token} 26")
@@ -287,15 +286,14 @@ class MiHomeControlPlugin(Star):
                 yield event.plain_result(f"❌ 不支持的动作或属性不完整: {token}")
                 return
 
-        # 高级属性透传链路
         raw_prop = remaining_parts[0]
         raw_val_str = " ".join(remaining_parts[1:])
         
-        prop_alias_norm = {str(k).strip().lower(): v for k, v in self.prop_alias.items()}
+        prop_alias_norm = {str(k).strip().lower(): v for k, v in prop_map.items()}
         prop = prop_alias_norm.get(raw_prop.strip().lower(), raw_prop.strip())
         
         raw_val_norm = raw_val_str.strip()
-        val_alias_norm = {str(k).strip().lower(): v for k, v in self.val_alias.items()}
+        val_alias_norm = {str(k).strip().lower(): v for k, v in val_map.items()}
         val_mapped = val_alias_norm.get(raw_val_norm.lower(), raw_val_norm)
         
         val = self._parse_value(val_mapped)
@@ -304,21 +302,14 @@ class MiHomeControlPlugin(Star):
         try:
             await self.client.set_property(did, prop, val, alias)
             yield event.plain_result("✅ 属性下发成功！")
-        except MiHomeAuthError: 
-            yield event.plain_result("❌ 鉴权失效，请重新登录。")
+        except MiHomeAuthError: yield event.plain_result("❌ 鉴权失效，请重新登录。")
         except MiHomeControlError as e:
             err = str(e)
-            if err == "device_not_found": 
-                yield event.plain_result("❌ 云端找不到设备。")
-            elif err == "device_rejected": 
-                yield event.plain_result("❌ 设备拒绝请求 (只读属性、属性名错误或值越界)。")
-            else: 
-                yield event.plain_result(f"❌ 设置失败: {err}")
-        except MiHomeClientError as e: 
-            yield event.plain_result(f"❌ API/网络异常: {e}")
-        except Exception as e:
-            logger.error(f"[MiHome] 设置异常: {e}")
-            yield event.plain_result(f"❌ 内部错误。")
+            if err == "device_not_found": yield event.plain_result("❌ 云端找不到设备。")
+            elif err == "device_rejected": yield event.plain_result("❌ 设备拒绝请求 (请检查你输入的值是否超出了设备允许的范围)。")
+            else: yield event.plain_result(f"❌ 设置失败: {err}")
+        except MiHomeClientError as e: yield event.plain_result(f"❌ API/网络异常: {e}")
+        except Exception: yield event.plain_result(f"❌ 内部错误。")
 
     async def terminate(self):
         await self.client.terminate()
