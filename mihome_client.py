@@ -49,6 +49,14 @@ class MiHomeClient:
         if not self.api:
             raise MiHomeClientError("插件已被终止或未初始化。")
 
+    # 🚀 确认点 2：内存静默自愈机制已妥善安置！
+    def _prepare_device_sync(self, did: str):
+        self.api.login()
+        if getattr(self.api, "device_list", None) is None:
+            logger.debug("[MiHome] 底层内存缓存为空，触发静默自愈拉取...")
+            self.api.get_devices_list()
+        return mijiaDevice(self.api, did=did)
+
     async def get_login_status(self) -> Dict[str, Any]:
         state = self.data_manager.load_state()
         return {
@@ -217,8 +225,7 @@ class MiHomeClient:
         self._check_api()
         try:
             async with self._api_lock:
-                await asyncio.wait_for(asyncio.to_thread(self.api.login), timeout=10.0)
-                device = mijiaDevice(self.api, did=did)
+                device = await asyncio.wait_for(asyncio.to_thread(self._prepare_device_sync, did), timeout=20.0)
 
                 try:
                     prop_list = getattr(device, "prop_list", {})
@@ -231,7 +238,7 @@ class MiHomeClient:
                     live_props = await asyncio.wait_for(asyncio.to_thread(device.get_props), timeout=8.0)
                     if not isinstance(live_props, dict): live_props = {}
                 except Exception as e:
-                    logger.warning(f"[MiHome] 获取设备 {did} 实况失败: {e}")
+                    logger.warning(f"[MiHome] 获取设备 {did} 实况失败 (不影响图纸能力解析): {e}")
                     live_props = {}
 
                 if not prop_list and not live_props: return {}
@@ -242,7 +249,7 @@ class MiHomeClient:
                     "mac", "ip", "electric_power", "user_device_info"
                 ]
 
-                result = {"writable": [], "readable": {}}
+                result = {"writable": [], "readable": {}, "readable_keys": []}
                 all_keys = set(prop_list.keys()).union(set(live_props.keys()))
                 seen_normalized = set()
 
@@ -259,8 +266,12 @@ class MiHomeClient:
                     
                     prop_info = prop_list.get(k) or prop_list.get(k.replace("_", "-"))
                     if prop_info:
+                        # 🚀 确认点 3：rw 泛型校验大幅放宽
                         rw = getattr(prop_info, "rw", [])
-                        if isinstance(rw, list) and "write" in rw: is_writable = True
+                        if isinstance(rw, (list, tuple, set)) and "write" in rw:
+                            is_writable = True
+                        elif isinstance(rw, str) and "write" in rw.lower():
+                            is_writable = True
                         
                         unit = getattr(prop_info, "unit", "")
                         if unit == "percentage": unit_str = "%"
@@ -280,9 +291,12 @@ class MiHomeClient:
 
                     if is_writable:
                         result["writable"].append(norm_k)
-                    elif val is not None:
-                        if isinstance(val, float): val = round(val, 2)
-                        result["readable"][norm_k] = f"{val}{unit_str}"
+                    else:
+                        if val is not None:
+                            if isinstance(val, float): val = round(val, 2)
+                            result["readable"][norm_k] = f"{val}{unit_str}"
+                        else:
+                            result["readable_keys"].append(norm_k)
 
                 return result
                 
@@ -296,9 +310,8 @@ class MiHomeClient:
         self._check_api()
         try:
             async with self._api_lock:
-                await asyncio.wait_for(asyncio.to_thread(self.api.login), timeout=15.0)
                 logger.info(f"[MiHome] 执行开关控制: {device_name} ({did}) -> {'开' if is_on else '关'}")
-                device = mijiaDevice(self.api, did=did)
+                device = await asyncio.wait_for(asyncio.to_thread(self._prepare_device_sync, did), timeout=20.0)
                 await asyncio.wait_for(asyncio.to_thread(device.set, "on", is_on), timeout=15.0)
             self.data_manager.update_state(last_control_error="", last_control_device=device_name or did)
         except Exception as e:
@@ -309,9 +322,8 @@ class MiHomeClient:
         self._check_api()
         try:
             async with self._api_lock:
-                await asyncio.wait_for(asyncio.to_thread(self.api.login), timeout=15.0)
                 logger.info(f"[MiHome] 执行高级控制: {device_name} ({did}) -> [{prop}] = {value}")
-                device = mijiaDevice(self.api, did=did)
+                device = await asyncio.wait_for(asyncio.to_thread(self._prepare_device_sync, did), timeout=20.0)
                 await asyncio.wait_for(asyncio.to_thread(device.set, prop, value), timeout=15.0)
             self.data_manager.update_state(last_control_error="", last_control_device=device_name or did)
         except Exception as e:
