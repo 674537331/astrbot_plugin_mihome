@@ -1,6 +1,22 @@
 # -*- coding: utf-8 -*-
 from typing import Any, Dict, List
 
+CATEGORY_NONE = "无类别"
+CATEGORY_AC = "空调类别"
+CATEGORY_PURIFIER = "净化器类别"
+CATEGORY_FAN = "风扇类别"
+CATEGORY_COOKER = "蒸煮锅类别"
+CATEGORY_AIR_FRYER = "空气炸锅类别"
+
+VALID_CATEGORIES = {
+    CATEGORY_NONE,
+    CATEGORY_AC,
+    CATEGORY_PURIFIER,
+    CATEGORY_FAN,
+    CATEGORY_COOKER,
+    CATEGORY_AIR_FRYER,
+}
+
 # ==========================================
 # 🌐 全局兜底字典 (控制用: 中文 -> 英文)
 # ==========================================
@@ -42,13 +58,28 @@ GLOBAL_DISPLAY_MAP = {
     "heat_level": "当前火力",
     "keepwarm_set": "保温设置",
     "electric_power": "功率",
+    "target_temperature": "设定温度",
+    "ac_state": "空调状态",
+    "ac_work_mode": "空调工作模式",
+    "vertical_swing": "上下扫风状态",
+    "horizontal_swing": "摇头状态",
+    "recipe_name": "当前食谱",
+    "recipeid": "食谱编号",
+    "recipename": "当前食谱",
+    "current_keep_warm": "当前保温状态",
+    "reservation_left_time": "距离预约开始",
+    "texture": "口感设置",
+    "warm_temperature": "保温温度",
+    "cook_done": "烹饪是否完成",
+    "switch_pausetoadd": "中途加料",
+    "cookreservation": "预约设置",
 }
 
 # ==========================================
-# 📦 设备专属独立档案库 (特征词匹配)
+# 📦 类别模板库
 # ==========================================
-DEVICE_PROFILES = {
-    "空调插座": {
+CATEGORY_PROFILES = {
+    CATEGORY_AC: {
         "prop_map": {
             "温度": "target_temperature",
             "风速": "fan_level",
@@ -82,7 +113,7 @@ DEVICE_PROFILES = {
             "温度": "通常输入 16~30 之间的整数",
         },
     },
-    "空气净化器": {
+    CATEGORY_PURIFIER: {
         "prop_map": {
             "模式": "mode",
             "风速": "fan_level",
@@ -108,7 +139,7 @@ DEVICE_PROFILES = {
         },
         "help_hints": {},
     },
-    "空气炸锅": {
+    CATEGORY_AIR_FRYER: {
         "prop_map": {
             "模式": "mode",
             "时间": "target_time",
@@ -151,7 +182,7 @@ DEVICE_PROFILES = {
             "时间": "输入预计分钟数",
         },
     },
-    "蒸煮锅": {
+    CATEGORY_COOKER: {
         "prop_map": {
             "模式": "mode",
             "时间": "target_time",
@@ -194,7 +225,7 @@ DEVICE_PROFILES = {
         },
         "help_hints": {},
     },
-    "落地扇": {
+    CATEGORY_FAN: {
         "prop_map": {
             "模式": "mode",
             "风速": "fan_level",
@@ -219,48 +250,51 @@ DEVICE_PROFILES = {
 }
 
 
-def _match_profile(official_name: str) -> Dict[str, Any]:
-    for key, profile in DEVICE_PROFILES.items():
-        if key in official_name:
-            return profile
-    return {}
+def normalize_category(category: str) -> str:
+    category = str(category or "").strip()
+    return category if category in VALID_CATEGORIES else CATEGORY_NONE
 
 
-def get_device_prop_map(official_name: str) -> Dict[str, str]:
-    profile = _match_profile(official_name)
+def get_profile(category: str) -> Dict[str, Any]:
+    category = normalize_category(category)
+    return CATEGORY_PROFILES.get(category, {})
+
+
+def get_device_prop_map(category: str) -> Dict[str, str]:
+    profile = get_profile(category)
     return {**GLOBAL_PROP_MAP, **profile.get("prop_map", {})}
 
 
-def get_device_val_map(official_name: str) -> Dict[str, Any]:
-    profile = _match_profile(official_name)
+def get_device_val_map(category: str) -> Dict[str, Any]:
+    profile = get_profile(category)
     return {**GLOBAL_VAL_MAP, **profile.get("value_map", {})}
 
 
-def get_device_display_map(official_name: str) -> Dict[str, str]:
-    profile = _match_profile(official_name)
+def get_device_display_map(category: str) -> Dict[str, str]:
+    profile = get_profile(category)
     return {**GLOBAL_DISPLAY_MAP, **profile.get("display_map", {})}
 
 
-def get_reverse_prop_map(official_name: str) -> Dict[str, str]:
-    forward_map = get_device_prop_map(official_name)
+def get_reverse_prop_map(category: str) -> Dict[str, str]:
+    forward_map = get_device_prop_map(category)
     return {v: k for k, v in forward_map.items()}
 
 
-def get_device_detail_writable_keys(official_name: str) -> List[str]:
-    profile = _match_profile(official_name)
-    return profile.get("detail_writable", ["on"])
+def get_device_detail_writable_keys(category: str) -> List[str]:
+    profile = get_profile(category)
+    return profile.get("detail_writable", [])
 
 
-def get_device_detail_readable_keys(official_name: str) -> List[str]:
-    profile = _match_profile(official_name)
+def get_device_detail_readable_keys(category: str) -> List[str]:
+    profile = get_profile(category)
     return profile.get("detail_readable", [])
 
 
-def get_device_help_examples(official_name: str) -> Dict[str, List[str]]:
-    profile = _match_profile(official_name)
+def get_device_help_examples(category: str) -> Dict[str, List[str]]:
+    profile = get_profile(category)
     return profile.get("help_examples", {})
 
 
-def get_device_help_hints(official_name: str) -> Dict[str, str]:
-    profile = _match_profile(official_name)
+def get_device_help_hints(category: str) -> Dict[str, str]:
+    profile = get_profile(category)
     return profile.get("help_hints", {})
