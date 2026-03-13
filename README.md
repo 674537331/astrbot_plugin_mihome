@@ -20,9 +20,9 @@
 
 ---
 
-## 📦 高级属性控制已适配中文支持列表 (Supported Device Profiles)
-## 欢迎提交 Issue，帮助完善设备高级属性控制中文设置。
-## 该表仅限于高级属性控制（中文），单纯的设备开关指令和直接英文下发高级属性控制已对所有设备适配！
+### 📦 高级属性控制已适配中文支持列表 (Supported Device Profiles)
+#### 欢迎提交 Issue，帮助完善设备高级属性控制中文设置。
+#### 该表仅限于高级属性控制（中文），单纯的设备开关指令和直接英文下发高级属性控制已对所有设备适配！
 
 - [设备支持矩阵](https://github.com/674537331/astrbot_plugin_mihome/blob/main/docs/device_support_matrix.md)
 
