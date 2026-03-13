@@ -86,7 +86,7 @@ class MiHomeClient:
         if getattr(self.api, "device_list", None) is None:
             logger.debug("[MiHome] 底层内存缓存为空，触发静默自愈拉取...")
             self.api.get_devices_list()
-        return mijiaDevice(self.api, did=did)
+        return mijiaDevice(self.api, did=did, sleep_time=1.0)
 
     async def get_login_status(self) -> Dict[str, Any]:
         state = self.data_manager.load_state()
@@ -297,7 +297,7 @@ class MiHomeClient:
             async with self._api_lock:
                 device = await asyncio.wait_for(
                     asyncio.to_thread(self._prepare_device_sync, did),
-                    timeout=8.0,
+                    timeout=15.0,
                 )
 
                 try:
@@ -369,7 +369,7 @@ class MiHomeClient:
             async with self._api_lock:
                 device = await asyncio.wait_for(
                     asyncio.to_thread(self._prepare_device_sync, did),
-                    timeout=8.0,
+                    timeout=15.0,
                 )
 
                 try:
@@ -429,7 +429,7 @@ class MiHomeClient:
                         dict.fromkeys(self._normalize_key(k) for k in readable_keys if k)
                     )
 
-                    read_concurrency = 3
+                    read_concurrency = 2
                     semaphore = asyncio.Semaphore(read_concurrency)
 
                     async def fetch_one(norm_k: str):
@@ -448,7 +448,7 @@ class MiHomeClient:
                             try:
                                 val = await asyncio.wait_for(
                                     asyncio.to_thread(device.get, fetch_key),
-                                    timeout=2.2,
+                                    timeout=4.0,
                                 )
                                 if val is None:
                                     return norm_k, None
