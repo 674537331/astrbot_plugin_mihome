@@ -35,7 +35,7 @@
 请确保在 AstrBot 的 Python 环境中安装了以下依赖（可通过 `requirements.txt` 自动安装）：
 
 ```bash
-pip install mijiaAPI requests
+pip install mijiaAPI 
 ```
 
 ---
