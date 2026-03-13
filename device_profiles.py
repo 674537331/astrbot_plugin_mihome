@@ -53,6 +53,7 @@ GLOBAL_DISPLAY_MAP = {
     "pm2.5_density": "PM2.5浓度",
     "filter_left_time": "滤芯剩余天数",
     "filter_life_level": "滤芯寿命百分比",
+    "filter_used_time": "滤芯已使用时长",
     "mode": "运行模式",
     "fan_level": "风速档位",
     "on": "电源状态",
@@ -83,13 +84,11 @@ GLOBAL_DISPLAY_MAP = {
     "cookreservation": "预约设置",
     "air_quality": "空气质量状态",
     "fault": "故障状态",
-    "filter_used_time": "滤芯已使用时长",
     "moto_speed_rpm": "电机转速",
     "battery_level": "电池电量",
     "battery": "电池状态",
     "turn_pot": "翻面提醒状态",
     "auto_keep_warm": "自动保温",
-    "current_keep_warm": "当前保温状态",
     "power_set": "功率设置",
     "temp_reached": "到温提醒",
     "temp_reached_set": "提醒温度",
@@ -309,14 +308,15 @@ CATEGORY_PROFILES = {
 # ==========================================
 # 🎯 型号精确模板库
 # 规则：
-# 1. 优先按 model 精确命中
-# 2. 一旦命中 model，就以 model 模板为准
-# 3. 即使用户配置了 category，也先用 model
-# 4. model 未命中，才回退 category
+# - 凡进入 MODEL_PROFILES 的型号，默认视为完美适配
+# - 用户参数纳入模板
+# - 工程参数写入 hidden_props
+# - main.py 中对 model 命中设备不再显示“未纳入当前中文模板的原始属性”
 # ==========================================
 MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
     "careli.fryer.maf07c": {
         "category": CATEGORY_AIR_FRYER,
+        "hidden_props": [],
         "prop_map": {
             "模式": "mode",
             "时间": "target_time",
@@ -404,6 +404,15 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
 
     "deerma.mfcp.v3": {
         "category": CATEGORY_COOKER,
+        "hidden_props": [
+            "recipe_command",
+            "recipe_sort",
+            "mode_sort",
+            "recipes_recipe_command",
+            "stepid",
+            "user_device_info",
+            "lifetime",
+        ],
         "prop_map": {
             "模式": "mode",
             "时间": "target_time",
@@ -490,6 +499,13 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
 
     "lumi.acpartner.mcn02": {
         "category": CATEGORY_AC,
+        "hidden_props": [
+            "ac_ctrl_library",
+            "ac_ctrl_library_crc32",
+            "ac_type",
+            "brand_id",
+            "remote_id",
+        ],
         "prop_map": {
             "开关": "on",
             "模式": "mode",
@@ -547,6 +563,7 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
 
     "miaomiaoce.sensor_ht.t9": {
         "category": CATEGORY_TH_SENSOR,
+        "hidden_props": [],
         "prop_map": {},
         "value_map": {},
         "display_map": {
@@ -566,6 +583,48 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
 
     "yunmai.scales.ms103": {
         "category": CATEGORY_BODY_SCALE,
+        "hidden_props": [
+            "app_version",
+            "balance_time",
+            "body_composition",
+            "current_time",
+            "customized_argument_3",
+            "customized_argument_4",
+            "customized_argument_5",
+            "firmwareversion",
+            "hash_code",
+            "heart_rate_detection",
+            "idx",
+            "idx_string",
+            "is_owner",
+            "mac",
+            "miid",
+            "offline_data_count",
+            "offline_msg_cnt",
+            "only_upload_count",
+            "pluginversion",
+            "real_weight",
+            "report_offline_data",
+            "self_check_items",
+            "self_check_result",
+            "share_user_list",
+            "sn",
+            "syncinfo_current_time",
+            "syncinfo_heart_rate_detection",
+            "syncinfo_unit",
+            "time",
+            "user_age",
+            "user_bfp",
+            "user_count",
+            "user_height",
+            "user_id",
+            "user_sex",
+            "user_status",
+            "user_type",
+            "user_weight",
+            "userinfolist",
+            "weight_data",
+        ],
         "prop_map": {},
         "value_map": {},
         "display_map": {
@@ -589,6 +648,11 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
 
     "zhimi.airp.rma3": {
         "category": CATEGORY_PURIFIER,
+        "hidden_props": [
+            "aqi_updata_heartbeat",
+            "filter_used_time_dbg",
+            "moto_speed_rpm",
+        ],
         "prop_map": {
             "开关": "on",
             "模式": "mode",
@@ -628,7 +692,6 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
             "filter_left_time": "滤芯剩余天数",
             "filter_life_level": "滤芯寿命百分比",
             "filter_used_time": "滤芯已使用时长",
-            "moto_speed_rpm": "电机转速",
         },
         "detail_writable": [
             "on",
@@ -645,6 +708,7 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
             "air_quality",
             "filter_left_time",
             "filter_life_level",
+            "filter_used_time",
             "fault",
         ],
         "help_examples": {
@@ -677,6 +741,15 @@ def get_model_profile(model: str) -> Dict[str, Any]:
     if not model:
         return {}
     return MODEL_PROFILES.get(model, {})
+
+
+def has_model_profile(model: str) -> bool:
+    return bool(get_model_profile(model))
+
+
+def get_model_hidden_props(model: str) -> List[str]:
+    profile = get_model_profile(model)
+    return profile.get("hidden_props", [])
 
 
 def get_category_profile(category: str) -> Dict[str, Any]:
