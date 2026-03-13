@@ -21,6 +21,7 @@ from .device_profiles import (
     get_device_detail_readable_keys,
     get_device_help_examples,
     get_device_help_hints,
+    resolve_effective_category,
 )
 
 PLUGIN_NAME = "astrbot_plugin_mihome"
@@ -109,6 +110,11 @@ class MiHomeControlPlugin(Star):
         state = self.data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
         return str(did_to_name.get(did, "")).strip()
+
+    def _get_model_by_did(self, did: str) -> str:
+        state = self.data_manager.load_state()
+        did_to_model = state.get("did_to_model", {})
+        return str(did_to_model.get(did, "")).strip()
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登录")
@@ -204,7 +210,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家详情")
     async def mihome_device_detail(self, event: AstrMessageEvent):
-        """查看设备详情；已分类设备优先走中文模板，未分类设备走原始能力探测。"""
+        """查看设备详情；优先按 model 精确模板匹配，未命中再回退到 category，最后回退为无类别。"""
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
 
@@ -231,7 +237,9 @@ class MiHomeControlPlugin(Star):
             return
 
         did = device_map[alias]
-        category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        model = self._get_model_by_did(did)
+        category = resolve_effective_category(model=model, category=configured_category)
         cloud_name = self._get_cloud_name_by_did(did)
 
         if category == CATEGORY_NONE:
@@ -259,10 +267,10 @@ class MiHomeControlPlugin(Star):
                 )
             return
 
-        display_map = get_device_display_map(category)
-        reverse_prop_map = get_reverse_prop_map(category)
-        fallback_writables = get_device_detail_writable_keys(category)
-        fallback_readables = get_device_detail_readable_keys(category)
+        display_map = get_device_display_map(model=model, category=category)
+        reverse_prop_map = get_reverse_prop_map(model=model, category=category)
+        fallback_writables = get_device_detail_writable_keys(model=model, category=category)
+        fallback_readables = get_device_detail_readable_keys(model=model, category=category)
 
         stage1_lines = [f"📖 【{alias}】:"]
 
@@ -346,7 +354,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家帮助")
     async def mihome_control_help(self, event: AstrMessageEvent):
-        """查看设备控制帮助。"""
+        """查看设备控制帮助；优先按 model 精确模板匹配，未命中再回退到 category，最后回退为无类别。"""
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
 
@@ -371,7 +379,10 @@ class MiHomeControlPlugin(Star):
             )
             return
 
-        category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        did = device_map[alias]
+        configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        model = self._get_model_by_did(did)
+        category = resolve_effective_category(model=model, category=configured_category)
 
         if category == CATEGORY_NONE:
             yield event.plain_result(
@@ -386,10 +397,10 @@ class MiHomeControlPlugin(Star):
             )
             return
 
-        reverse_prop_map = get_reverse_prop_map(category)
-        fallback_writables = get_device_detail_writable_keys(category)
-        help_examples = get_device_help_examples(category)
-        help_hints = get_device_help_hints(category)
+        reverse_prop_map = get_reverse_prop_map(model=model, category=category)
+        fallback_writables = get_device_detail_writable_keys(model=model, category=category)
+        help_examples = get_device_help_examples(model=model, category=category)
+        help_hints = get_device_help_hints(model=model, category=category)
 
         msg_lines = [f"✅ 【{alias}】控制指南:"]
 
@@ -420,7 +431,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家控制")
     async def control_mihome_device(self, event: AstrMessageEvent):
-        """控制米家设备。"""
+        """控制米家设备；优先按 model 精确模板匹配，未命中再回退到 category，最后回退为无类别。"""
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
 
@@ -458,10 +469,12 @@ class MiHomeControlPlugin(Star):
             return
 
         did = device_map[alias]
-        category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        model = self._get_model_by_did(did)
+        category = resolve_effective_category(model=model, category=configured_category)
 
-        prop_map = get_device_prop_map(category)
-        val_map = get_device_val_map(category)
+        prop_map = get_device_prop_map(model=model, category=category)
+        val_map = get_device_val_map(model=model, category=category)
 
         if len(remaining_parts) == 1:
             token = remaining_parts[0]
