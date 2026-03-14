@@ -134,7 +134,6 @@ class MiHomeClient:
             "scene_name": scene_name,
             "home_id": home_id,
             "home_name": home_name,
-            "raw": item,
         }
 
     def _save_scene_cache(self, scenes: List[Dict[str, Any]]) -> None:
@@ -220,6 +219,7 @@ class MiHomeClient:
                     chunk = await proc.stdout.read(256)
                     if not chunk:
                         break
+
                     text = chunk.decode("utf-8", errors="replace")
                     full_buffer = (full_buffer + text)[-4096:]
 
@@ -229,20 +229,37 @@ class MiHomeClient:
                                 logger.debug(f"[Sandbox] {line.strip()}")
 
                     if not qr_found:
-                        compact = full_buffer.replace("\r", "").replace("\n", "")
-                        match = re.search(
-                            r'(https://account\.xiaomi\.com/pass/qr/login\?[^\s\'"]+)',
-                            compact,
-                        )
-                        if match:
-                            url = match.group(1)
-                            if "ticket=" in url and "dc=" in url and "sid=" in url:
-                                qr_found = True
-                                logger.info("[MiHome] 成功提取完整登录链接。")
-                                if asyncio.iscoroutinefunction(qr_callback):
-                                    await qr_callback(url)
-                                else:
-                                    qr_callback(url)
+                        for raw_line in text.splitlines():
+                            line = raw_line.strip()
+                            if not line:
+                                continue
+
+                            match = re.search(
+                                r'二维码图片:\s*(https://account\.xiaomi\.com/pass/qr/login\?[^\s\'"]+)',
+                                line,
+                            )
+                            if not match:
+                                match = re.search(
+                                    r'(https://account\.xiaomi\.com/pass/qr/login\?[^\s\'"]+)',
+                                    line,
+                                )
+
+                            if match:
+                                url = match.group(1).strip()
+
+                                for sep in ("DEBUG:", "INFO:", "[Sandbox]"):
+                                    pos = url.find(sep)
+                                    if pos > 0:
+                                        url = url[:pos].strip()
+
+                                if "ticket=" in url and "dc=" in url and "sid=" in url:
+                                    qr_found = True
+                                    logger.info("[MiHome] 成功提取完整登录链接。")
+                                    if asyncio.iscoroutinefunction(qr_callback):
+                                        await qr_callback(url)
+                                    else:
+                                        qr_callback(url)
+                                    break
 
             try:
                 await asyncio.wait_for(
