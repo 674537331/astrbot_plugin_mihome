@@ -159,7 +159,7 @@ pip install mijiaAPI
 </details>
 
 <details>
-<summary><b>🎬 米家智能场景支持（Scenes） (点击展开)</b></summary>
+<summary><b>🎬 米家智能场景支持（Scenes）（推荐的使用方式） (点击展开)</b></summary>
 
 支持执行米家 APP 中已配置的“手动执行”场景。
 
@@ -206,7 +206,7 @@ pip install mijiaAPI
 </details>
 
 <details>
-<summary><b>🤖 大模型自然语言联动（LLM Tool） (点击展开)</b></summary>
+<summary><b>🤖 大模型自然语言联动（LLM Tool）（推荐的使用方式） (点击展开)</b></summary>
 
 ### 🛡️ 安全边界
 大模型只允许使用场景能力，不会被开放以下高风险控制能力：
