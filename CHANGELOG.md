@@ -5,7 +5,7 @@
 #### 欢迎提交 Issue，帮助完善设备高级属性控制中文设置。
 #### 该表仅限于高级属性控制（中文），单纯的设备开关指令和直接英文下发高级属性控制已对所有设备适配！
 
-- [设备支持矩阵](https://github.com/674537331/astrbot_plugin_mihome/blob/main/docs/device_support_matrix.md)
+- [点击查看设备支持矩阵](https://github.com/674537331/astrbot_plugin_mihome/blob/main/docs/device_support_matrix.md)
 
 > **提示**：即使您的设备不在上述列表中，由于系统内置了强大的**自动嗅探与全局兜底机制**，您依然可以完美使用基础的**开关控制**，并看到英文原生的传感器数据反馈！
 > **维护警告**：当前**高级属性控制**全部由GPT-5.4和Gemini-3.1-Pro进行维护与代码审查。
