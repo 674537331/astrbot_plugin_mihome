@@ -187,7 +187,7 @@ pip install mijiaAPI
 ---
 
 <details>
-<summary><b>🎬 米家智能场景支持（Scenes）(点击展开)</b></summary>
+<summary><b>🎬 米家智能场景支持（Scenes）（推荐使用方式）(点击展开)</b></summary>
 
 除了直接控制单个设备，本插件现已支持执行米家 APP 中已配置的“手动执行”智能场景。  
 你既可以通过指令手动触发，也可以在启用场景 Tool 后让大模型协助执行。
@@ -239,7 +239,7 @@ pip install mijiaAPI
 ---
 
 <details>
-<summary><b>🤖 大模型自然语言联动（LLM Tool）(点击展开)</b></summary>
+<summary><b>🤖 大模型自然语言联动（LLM Tool）（推荐使用方式）(点击展开)</b></summary>
 
 本插件支持为大模型提供米家场景相关 Tool，但出于安全考虑，能力边界被严格限制。
 
