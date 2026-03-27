@@ -2,6 +2,7 @@
 import json
 import shlex
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Tuple, Optional
 
 from astrbot.api.event import filter, AstrMessageEvent
@@ -19,6 +20,12 @@ from .mihome_client import (
 from .device_profiles import (
     normalize_category,
     CATEGORY_NONE,
+    CATEGORY_AC,
+    CATEGORY_PURIFIER,
+    CATEGORY_FAN,
+    CATEGORY_TH_SENSOR,
+    CATEGORY_BODY_SCALE,
+    CATEGORY_VACUUM,
     get_device_prop_map,
     get_device_val_map,
     get_device_display_map,
@@ -38,8 +45,17 @@ from .device_profiles import (
 
 PLUGIN_NAME = "astrbot_plugin_mihome"
 
+READONLY_ALLOWED_CATEGORIES = {
+    CATEGORY_AC,
+    CATEGORY_PURIFIER,
+    CATEGORY_FAN,
+    CATEGORY_TH_SENSOR,
+    CATEGORY_BODY_SCALE,
+    CATEGORY_VACUUM,
+}
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "6.5.1")
+
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "6.6.0")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -124,6 +140,9 @@ class MiHomeControlPlugin(Star):
     def _scene_tool_enabled(self) -> bool:
         return bool(self.config.get("enable_scene_tool", False))
 
+    def _readonly_tool_enabled(self) -> bool:
+        return bool(self.config.get("enable_readonly_tool", False))
+
     def _get_cloud_name_by_did(self, did: str) -> str:
         state = self.data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
@@ -151,6 +170,19 @@ class MiHomeControlPlugin(Star):
         if home_id:
             return f"{idx}. {scene_name}  [scene_id={scene_id}]  (家庭: {home_name} / {home_id})"
         return f"{idx}. {scene_name}  [scene_id={scene_id}]  (家庭: {home_name})"
+
+    def _format_alias_line(self, idx: int, alias: str, did: str, category_map: Dict[str, str]) -> str:
+        configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        model = self._get_model_by_did(did)
+        effective_category = resolve_effective_category(model=model, category=configured_category)
+        cloud_name = self._get_cloud_name_by_did(did)
+
+        parts = [f"{idx}. {alias}"]
+        if cloud_name and cloud_name != alias:
+            parts.append(f"(云端名: {cloud_name})")
+        if effective_category != CATEGORY_NONE:
+            parts.append(f"[类别: {effective_category}]")
+        return " ".join(parts)
 
     async def _resolve_scene_query(self, query: str, prefer_cache: bool = False) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         query = str(query or "").strip()
@@ -183,6 +215,87 @@ class MiHomeControlPlugin(Star):
             return None, "\n".join(lines)
 
         return None, "not_found"
+
+    async def _render_readonly_status_by_alias(self, alias: str) -> str:
+        device_map = self._parse_device_map()
+        category_map = self._parse_category_map()
+
+        alias = str(alias or "").strip()
+        if not alias:
+            return "device_alias 不能为空。"
+
+        if alias not in device_map:
+            return (
+                f"未找到已配置别名：{alias}。\n"
+                f"请先调用 list_configured_mihome_aliases 查看当前可读取的设备别名，并使用其中一个精确别名。"
+            )
+
+        did = device_map[alias]
+        configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        model = self._get_model_by_did(did)
+        effective_category = resolve_effective_category(model=model, category=configured_category)
+        cloud_name = self._get_cloud_name_by_did(did)
+
+        if effective_category == CATEGORY_NONE:
+            return (
+                f"设备别名“{alias}”尚未配置有效设备类别，当前不开放给只读 LLM Tool。\n"
+                f"请先在 device_category_map 中为该别名配置明确类别后再读取。"
+            )
+
+        if effective_category not in READONLY_ALLOWED_CATEGORIES:
+            return (
+                f"设备别名“{alias}”所属类别为“{effective_category}”，当前不在只读 Tool 开放范围内。"
+            )
+
+        readable_keys = get_device_detail_readable_keys(model=model, category=effective_category)
+        display_map = get_device_display_map(model=model, category=effective_category)
+
+        if not readable_keys:
+            return (
+                f"设备别名“{alias}”当前没有预定义的可读状态模板，暂不支持通过只读 Tool 查询。"
+            )
+
+        props_data = await self.client.get_device_props(did, readable_keys=readable_keys)
+        error_msg = props_data.get("__error__")
+        if error_msg:
+            return (
+                f"读取设备“{alias}”实时状态失败：{error_msg}\n"
+                f"说明：该 Tool 不使用缓存，只读取当前实时状态。"
+            )
+
+        readables = props_data.get("readable", {})
+        readable_keys_missing = props_data.get("readable_keys", [])
+
+        lines = [f"设备别名：{alias}"]
+        if cloud_name and cloud_name != alias:
+            lines.append(f"云端名称：{cloud_name}")
+        lines.append(f"设备类别：{effective_category}")
+        lines.append(f"读取时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        if readables:
+            lines.append("当前状态：")
+            translated_items = []
+            for k, v in readables.items():
+                friendly_name = display_map.get(k, k)
+                translated_items.append((friendly_name, v))
+            translated_items.sort(key=lambda x: x[0])
+
+            for idx, (name, val) in enumerate(translated_items):
+                prefix = " └─ " if idx == len(translated_items) - 1 else " ├─ "
+                lines.append(f"{prefix}{name}: {val}")
+        else:
+            lines.append("当前状态：暂无可读取到的实时数据。")
+
+        filtered_missing = [k for k in readable_keys_missing if k in readable_keys]
+        if filtered_missing:
+            translated_missing = [display_map.get(k, k) for k in filtered_missing]
+            lines.append("")
+            lines.append("以下状态项当前无数据或读取失败：")
+            lines.append(", ".join(translated_missing))
+
+        lines.append("")
+        lines.append("说明：本结果为实时读取，不使用缓存；且仅允许从已配置别名中检索设备。")
+        return "\n".join(lines)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登录")
@@ -836,6 +949,59 @@ class MiHomeControlPlugin(Star):
             yield event.plain_result(f"❌ API/网络异常: {e}")
         except Exception:
             yield event.plain_result("❌ 内部错误。")
+
+    @filter.llm_tool(name="list_configured_mihome_aliases")
+    async def list_configured_mihome_aliases_tool(self, event: AstrMessageEvent) -> str:
+        """
+        列出当前插件中已配置的米家设备别名（只读工具）。
+        使用限制：
+        1. 仅返回 device_map 中已显式配置的设备别名，不会读取未配置别名的设备。
+        2. 该工具不会执行任何设备控制，也不会读取设备实时状态。
+        3. 当你需要确定某个设备的精确别名时，才应调用本工具。
+        4. 若用户只是普通聊天或寒暄，不应调用本工具。
+        """
+        if not self._readonly_tool_enabled():
+            return "米家设备只读 Tool 当前未启用。"
+
+        device_map = self._parse_device_map()
+        category_map = self._parse_category_map()
+
+        if not device_map:
+            return "当前没有已配置的米家设备别名，请先在插件配置的 device_map 中添加别名。"
+
+        lines = [f"当前已配置 {len(device_map)} 个米家设备别名："]
+        for idx, alias in enumerate(sorted(device_map.keys()), 1):
+            did = device_map[alias]
+            lines.append(self._format_alias_line(idx, alias, did, category_map))
+
+        lines.append("")
+        lines.append("说明：只读查询工具只能从以上别名中检索设备。")
+        return "\n".join(lines)
+
+    @filter.llm_tool(name="read_mihome_device_status_by_alias")
+    async def read_mihome_device_status_by_alias_tool(self, event: AstrMessageEvent, device_alias: str) -> str:
+        """
+        按设备别名实时读取米家设备当前状态（只读工具）。
+        使用限制（必须遵守）：
+        1. 该工具只允许读取状态，不允许执行任何控制、动作或场景。
+        2. 该工具只能从 device_map 中已配置的精确别名中检索设备，不能读取未配置别名的设备。
+        3. 该工具不会使用缓存，返回结果为实时读取。
+        4. 若不确定设备精确别名，应先调用 list_configured_mihome_aliases 获取别名列表。
+        5. 优先用于温湿度、空气质量、电源状态、工作模式等状态查询场景。
+        Args:
+            device_alias(string): 需要读取状态的设备精确别名，必须来自 device_map
+        """
+        if not self._readonly_tool_enabled():
+            return "米家设备只读 Tool 当前未启用。"
+
+        try:
+            return await self._render_readonly_status_by_alias(device_alias)
+        except MiHomeAuthError:
+            return "米家登录已失效，请先重新登录。"
+        except MiHomeClientError as e:
+            return f"读取设备状态失败：{e}"
+        except Exception as e:
+            return f"内部错误：{e}"
 
     @filter.llm_tool(name="list_cached_mihome_scenes")
     async def list_cached_mihome_scenes_tool(self, event: AstrMessageEvent) -> str:
