@@ -26,6 +26,8 @@ from .device_profiles import (
     CATEGORY_TH_SENSOR,
     CATEGORY_BODY_SCALE,
     CATEGORY_VACUUM,
+    CATEGORY_WATER_HEATER,
+    CATEGORY_ROUTER,
     get_device_prop_map,
     get_device_val_map,
     get_device_display_map,
@@ -52,6 +54,8 @@ READONLY_ALLOWED_CATEGORIES = {
     CATEGORY_TH_SENSOR,
     CATEGORY_BODY_SCALE,
     CATEGORY_VACUUM,
+    CATEGORY_WATER_HEATER,
+    CATEGORY_ROUTER,
 }
 
 
