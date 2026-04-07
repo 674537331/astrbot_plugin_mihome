@@ -3,7 +3,7 @@ display_name: 米家控制
 desc: AstrBot 的米家云端智能管家插件
 help: |
   支持通过私聊对米家设备进行扫码授权和控制。
-version: v7.1.1
+version: v7.1.2
 astrbot_version: ">=4.0.0"
 support_platforms:
   - aiocqhttp
