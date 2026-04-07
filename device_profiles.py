@@ -697,7 +697,7 @@ CATEGORY_PROFILES = {
         "help_examples": {},
         "action_examples": [],
         "help_hints": {},
-    },,
+    },
 
     CATEGORY_SWITCH: {
         "prop_map": {
