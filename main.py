@@ -28,9 +28,13 @@ from .device_profiles import (
     CATEGORY_VACUUM,
     CATEGORY_WATER_HEATER,
     CATEGORY_ROUTER,
+    CATEGORY_SWITCH,
+    CATEGORY_DOOR_SENSOR,
+    CATEGORY_GAS_SENSOR,
     get_device_prop_map,
     get_device_val_map,
     get_device_display_map,
+    get_device_value_display_map,
     get_device_action_map,
     get_reverse_prop_map,
     get_reverse_action_map,
@@ -56,6 +60,9 @@ READONLY_ALLOWED_CATEGORIES = {
     CATEGORY_VACUUM,
     CATEGORY_WATER_HEATER,
     CATEGORY_ROUTER,
+    CATEGORY_SWITCH,
+    CATEGORY_DOOR_SENSOR,
+    CATEGORY_GAS_SENSOR,
 }
 
 
@@ -137,6 +144,31 @@ class MiHomeControlPlugin(Star):
             return float(val_str)
 
         return val_str
+
+    def _translate_readable_value(self, key: str, raw_value: Any, value_display_map: Dict[str, Dict[Any, str]]) -> Any:
+        mapping = value_display_map.get(key, {})
+        if not mapping:
+            return raw_value
+
+        try:
+            if raw_value in mapping:
+                return mapping[raw_value]
+        except TypeError:
+            pass
+
+        parsed_value = self._parse_value(raw_value)
+        try:
+            if parsed_value in mapping:
+                return mapping[parsed_value]
+        except TypeError:
+            pass
+
+        raw_str = str(raw_value).strip()
+        for map_key, map_val in mapping.items():
+            if str(map_key).strip().lower() == raw_str.lower():
+                return map_val
+
+        return raw_value
 
     def _normalize_action_token(self, s: str) -> str:
         return str(s or "").strip().lower().replace("-", "_").replace(" ", "_")
@@ -253,6 +285,7 @@ class MiHomeControlPlugin(Star):
 
         readable_keys = get_device_detail_readable_keys(model=model, category=effective_category)
         display_map = get_device_display_map(model=model, category=effective_category)
+        value_display_map = get_device_value_display_map(model=model, category=effective_category)
 
         if not readable_keys:
             return (
@@ -281,7 +314,8 @@ class MiHomeControlPlugin(Star):
             translated_items = []
             for k, v in readables.items():
                 friendly_name = display_map.get(k, k)
-                translated_items.append((friendly_name, v))
+                friendly_val = self._translate_readable_value(k, v, value_display_map)
+                translated_items.append((friendly_name, friendly_val))
             translated_items.sort(key=lambda x: x[0])
 
             for idx, (name, val) in enumerate(translated_items):
@@ -545,6 +579,7 @@ class MiHomeControlPlugin(Star):
             return
 
         display_map = get_device_display_map(model=model, category=category)
+        value_display_map = get_device_value_display_map(model=model, category=category)
         reverse_prop_map = get_reverse_prop_map(model=model, category=category)
         reverse_action_map = get_reverse_action_map(model=model, category=category)
         fallback_writables = get_device_detail_writable_keys(model=model, category=category)
@@ -602,7 +637,8 @@ class MiHomeControlPlugin(Star):
                 translated_items = []
                 for k, v in readables.items():
                     friendly_name = display_map.get(k, k)
-                    translated_items.append((friendly_name, v))
+                    friendly_val = self._translate_readable_value(k, v, value_display_map)
+                    translated_items.append((friendly_name, friendly_val))
                 translated_items.sort(key=lambda x: x[0])
                 for idx, (name, val) in enumerate(translated_items):
                     prefix = " └─ " if idx == len(translated_items) - 1 else " ├─ "
