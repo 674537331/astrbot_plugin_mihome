@@ -15,6 +15,9 @@ CATEGORY_BODY_SCALE = "体脂秤类别"
 CATEGORY_VACUUM = "扫地机类别"
 CATEGORY_WATER_HEATER = "热水器类别"
 CATEGORY_ROUTER = "路由器类别"
+CATEGORY_SWITCH = "开关类别"
+CATEGORY_DOOR_SENSOR = "门磁传感器类别"
+CATEGORY_GAS_SENSOR = "燃气传感器类别"
 
 VALID_CATEGORIES = {
     CATEGORY_NONE,
@@ -28,6 +31,9 @@ VALID_CATEGORIES = {
     CATEGORY_VACUUM,
     CATEGORY_WATER_HEATER,
     CATEGORY_ROUTER,
+    CATEGORY_SWITCH,
+    CATEGORY_DOOR_SENSOR,
+    CATEGORY_GAS_SENSOR,
 }
 
 # ==========================================
@@ -691,7 +697,100 @@ CATEGORY_PROFILES = {
         "help_examples": {},
         "action_examples": [],
         "help_hints": {},
+    },,
+
+    CATEGORY_SWITCH: {
+        "prop_map": {
+            "开关": "on",
+            "模式": "mode",
+        },
+        "value_map": {
+            "开": True,
+            "关": False,
+        },
+        "display_map": {
+            "on": "电源状态",
+            "mode": "运行模式",
+            "anti_flicker": "防闪烁",
+            "temperature": "模块温度",
+        },
+        "detail_writable": ["on", "mode", "anti_flicker"],
+        "detail_readable": ["on", "mode", "anti_flicker", "temperature"],
+        "detail_actions": ["toggle"],
+        "action_map": {
+            "切换": "toggle",
+        },
+        "help_examples": {
+            "开关": ["开", "关"],
+        },
+        "action_examples": ["切换"],
+        "help_hints": {},
     },
+
+    CATEGORY_DOOR_SENSOR: {
+        "prop_map": {},
+        "value_map": {},
+        "display_map": {
+            "contact_state": "门窗状态",
+            "illumination": "光照强度",
+            "battery_level": "电池电量",
+        },
+        "value_display_map": {
+            "contact_state": {
+                True: "已关闭",
+                False: "已打开",
+            },
+            "illumination": {
+                1: "弱",
+                2: "强",
+            },
+        },
+        "detail_writable": [],
+        "detail_readable": ["contact_state", "illumination", "battery_level"],
+        "detail_actions": [],
+        "action_map": {},
+        "help_examples": {},
+        "action_examples": [],
+        "help_hints": {},
+    },
+
+    CATEGORY_GAS_SENSOR: {
+        "prop_map": {
+            "消音": "mute",
+            "自检": "self_inspection",
+        },
+        "value_map": {
+            "开": 1,
+        },
+        "display_map": {
+            "status": "工作状态",
+            "gas_concentration": "天然气浓度(%LEL)",
+        },
+        "value_display_map": {
+            "status": {
+                0: "预热",
+                1: "监测正常",
+                2: "自检中",
+                3: "传感器寿命到期",
+                4: "设备故障",
+                5: "天然气泄漏报警",
+            },
+        },
+        "detail_writable": ["self_inspection", "mute"],
+        "detail_readable": ["status", "gas_concentration"],
+        "detail_actions": [],
+        "action_map": {},
+        "help_examples": {
+            "消音": ["开"],
+            "自检": ["开"],
+        },
+        "action_examples": [],
+        "help_hints": {
+            "消音": "下发1启动远程消音（仅报警时有效）",
+            "自检": "下发1触发一次APP远程自检",
+        },
+    },
+
 }
 
 # ==========================================
@@ -1693,6 +1792,11 @@ def get_device_val_map(model: str = "", category: str = "") -> Dict[str, Any]:
 def get_device_display_map(model: str = "", category: str = "") -> Dict[str, str]:
     profile = resolve_profile(model=model, category=category)
     return {**GLOBAL_DISPLAY_MAP, **profile.get("display_map", {})}
+
+
+def get_device_value_display_map(model: str = "", category: str = "") -> Dict[str, Dict[Any, str]]:
+    profile = resolve_profile(model=model, category=category)
+    return {k: dict(v) for k, v in profile.get("value_display_map", {}).items()}
 
 
 def get_device_action_map(model: str = "", category: str = "") -> Dict[str, str]:
