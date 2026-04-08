@@ -25,6 +25,12 @@
     "default": false,
     "hint": "开启后，大模型可调用米家场景相关工具。仅开放场景列表读取与场景执行，不开放设备属性控制、设备动作控制等高风险能力。"
   },
+  "scene_tool_admin_only": {
+    "description": "场景 LLM Tool 是否仅管理员可调用",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，list_cached_mihome_scenes 与 execute_mihome_scene 两个场景工具仅管理员可用。默认关闭以保持兼容。"
+  },
   "enable_readonly_tool": {
     "description": "是否启用米家设备只读 LLM Tool",
     "type": "bool",
