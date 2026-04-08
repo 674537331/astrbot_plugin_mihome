@@ -174,9 +174,15 @@ class MiHomeControlPlugin(Star):
         return str(s or "").strip().lower().replace("-", "_").replace(" ", "_")
 
     def _scene_tool_enabled(self) -> bool:
+        scene_tool_cfg = self.config.get("scene_tool", {})
+        if isinstance(scene_tool_cfg, dict) and "enable" in scene_tool_cfg:
+            return bool(scene_tool_cfg.get("enable", False))
         return bool(self.config.get("enable_scene_tool", False))
 
     def _scene_tool_admin_only(self) -> bool:
+        scene_tool_cfg = self.config.get("scene_tool", {})
+        if isinstance(scene_tool_cfg, dict) and "admin_only" in scene_tool_cfg:
+            return bool(scene_tool_cfg.get("admin_only", False))
         return bool(self.config.get("scene_tool_admin_only", False))
 
     def _event_is_admin(self, event: AstrMessageEvent) -> bool:
