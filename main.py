@@ -66,7 +66,7 @@ READONLY_ALLOWED_CATEGORIES = {
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.1.0")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.2.0")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -174,7 +174,53 @@ class MiHomeControlPlugin(Star):
         return str(s or "").strip().lower().replace("-", "_").replace(" ", "_")
 
     def _scene_tool_enabled(self) -> bool:
+        scene_tool_cfg = self.config.get("scene_tool", {})
+        if isinstance(scene_tool_cfg, dict) and "enable" in scene_tool_cfg:
+            return bool(scene_tool_cfg.get("enable", False))
         return bool(self.config.get("enable_scene_tool", False))
+
+    def _scene_tool_admin_only(self) -> bool:
+        scene_tool_cfg = self.config.get("scene_tool", {})
+        if isinstance(scene_tool_cfg, dict) and "admin_only" in scene_tool_cfg:
+            return bool(scene_tool_cfg.get("admin_only", False))
+        return bool(self.config.get("scene_tool_admin_only", False))
+
+    def _event_is_admin(self, event: AstrMessageEvent) -> bool:
+        checker_names = (
+            "is_admin",
+            "is_admin_user",
+            "is_owner",
+            "is_superuser",
+        )
+        for name in checker_names:
+            checker = getattr(event, name, None)
+            try:
+                if callable(checker) and bool(checker()):
+                    return True
+                if isinstance(checker, bool) and checker:
+                    return True
+            except Exception:
+                pass
+
+        message_obj = getattr(event, "message_obj", None)
+        sender = getattr(message_obj, "sender", None) if message_obj is not None else None
+        role = str(getattr(sender, "role", "") or "").strip().lower()
+        if role in {"owner", "admin", "administrator"}:
+            return True
+
+        for attr in ("is_admin", "admin", "is_owner"):
+            value = getattr(sender, attr, None) if sender is not None else None
+            if isinstance(value, bool) and value:
+                return True
+
+        return False
+
+    def _check_scene_tool_access(self, event: AstrMessageEvent) -> Optional[str]:
+        if not self._scene_tool_enabled():
+            return "米家场景 Tool 当前未启用。"
+        if self._scene_tool_admin_only() and not self._event_is_admin(event):
+            return "米家场景 Tool 当前仅管理员可调用。"
+        return None
 
     def _readonly_tool_enabled(self) -> bool:
         return bool(self.config.get("enable_readonly_tool", False))
@@ -1067,8 +1113,9 @@ class MiHomeControlPlugin(Star):
         2. 不允许因为看到了类似“关净化器”“晚安模式”的场景名，就直接说“已经帮你执行了”。
         3. 场景是否真正执行成功，必须以后续 execute_mihome_scene 工具返回结果为准。
         """
-        if not self._scene_tool_enabled():
-            return "米家场景 Tool 当前未启用。"
+        deny_msg = self._check_scene_tool_access(event)
+        if deny_msg:
+            return deny_msg
 
         scenes = self._get_cached_scenes()
         updated_at = self._get_scene_cache_updated_at()
@@ -1122,8 +1169,9 @@ class MiHomeControlPlugin(Star):
         Args:
             scene_name(string): 需要执行的米家场景名称或 scene_id
         """
-        if not self._scene_tool_enabled():
-            return "米家场景 Tool 当前未启用。"
+        deny_msg = self._check_scene_tool_access(event)
+        if deny_msg:
+            return deny_msg
 
         try:
             scene, err = await self._resolve_scene_query(scene_name, prefer_cache=True)

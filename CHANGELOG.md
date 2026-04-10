@@ -10,6 +10,29 @@
 > **提示**：即使您的设备不在上述列表中，由于系统内置了强大的**自动嗅探与全局兜底机制**，您依然可以完美使用基础的**开关控制**，并看到英文原生的传感器数据反馈！
 > **维护警告**：当前**高级属性控制**全部由GPT-5.4和Gemini-3.1-Pro进行维护与代码审查。
 ---
+## [v7.2.0] - 2026-04-08
+
+### Added
+- 场景 LLM Tool 新增可选管理员限制开关：
+  - `scene_tool.admin_only`
+- 扫地机档位值映射补充 `0挡 -> 0`，用于更明确的拖地水量控制表达。
+
+### Changed
+- 将米家场景 LLM Tool 配置从平铺结构调整为分组结构：
+  - `scene_tool.enable`
+  - `scene_tool.admin_only`
+- 场景类函数工具（缓存场景列表、执行场景）接入统一访问校验逻辑。
+- README 中扫地机控制示例同步为 `拖地水量 0挡`。
+
+### Security
+- 当 `scene_tool.admin_only` 开启时，场景 LLM Tool 仅允许管理员调用，降低非授权场景触发风险。
+
+### Compatibility
+- 保留并隐藏旧配置键作为兼容兜底：
+  - `enable_scene_tool`
+  - `scene_tool_admin_only`
+- 代码读取逻辑已兼容新旧结构，已有用户配置无需手动迁移。
+
 ## [v7.1.2] - 2026-04-07
 
 ### Added 参考 [PR #4](https://github.com/674537331/astrbot_plugin_mihome/pull/4)
