@@ -51,6 +51,40 @@ from .device_profiles import (
 
 PLUGIN_NAME = "astrbot_plugin_mihome"
 
+MIHOME_HELP_SECTIONS = (
+    (
+        "🔑 账号与同步",
+        (
+            ("/米家登录", "扫码授权米家账号"),
+            ("/米家状态", "查看登录、共享设备和最近控制状态"),
+            ("/刷新米家", "同步设备列表并刷新 DID、model 缓存"),
+            ("/米家登出", "清除登录凭证和本地状态"),
+        ),
+    ),
+    (
+        "📡 查询与帮助",
+        (
+            ("/米家详情 [设备别名]", "查看设备能力与实时状态"),
+            ("/米家帮助 [设备别名]", "查看设备专属控制示例"),
+        ),
+    ),
+    (
+        "🎬 场景",
+        (
+            ("/米家场景列表", "同步并列出云端场景"),
+            ("/米家场景 [场景名或 scene_id]", "执行指定场景"),
+        ),
+    ),
+    (
+        "🎛️ 设备控制",
+        (
+            ("/米家控制 [设备别名] [开/关]", "控制设备电源"),
+            ("/米家控制 [设备别名] [属性] [值]", "设置设备属性"),
+            ("/米家控制 [设备别名] [动作名]", "执行设备动作"),
+        ),
+    ),
+)
+
 READONLY_ALLOWED_CATEGORIES = {
     CATEGORY_AC,
     CATEGORY_PURIFIER,
@@ -66,7 +100,7 @@ READONLY_ALLOWED_CATEGORIES = {
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.2.1")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.3.0")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -172,6 +206,28 @@ class MiHomeControlPlugin(Star):
 
     def _normalize_action_token(self, s: str) -> str:
         return str(s or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+    def _render_command_help(self) -> str:
+        lines = [
+            "🏠 米家控制 · 指令总览",
+            "英文别名：/mihome_help",
+            "",
+        ]
+        for section_name, commands in MIHOME_HELP_SECTIONS:
+            lines.append(section_name)
+            for command, description in commands:
+                lines.append(f"- {command}：{description}")
+            lines.append("")
+
+        lines.extend(
+            (
+                "🚀 快速开始",
+                "/米家登录 → /刷新米家 → 在 WebUI 配置 device_map → /米家详情 [设备别名]",
+                "",
+                "🔒 除本帮助入口外，以上账号、设备与场景指令仅管理员可执行。",
+            )
+        )
+        return "\n".join(lines)
 
     def _scene_tool_enabled(self) -> bool:
         scene_tool_cfg = self.config.get("scene_tool", {})
@@ -384,6 +440,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登录")
     async def mihome_login(self, event: AstrMessageEvent):
+        """扫码授权米家账号"""
         yield event.plain_result("⏳ 正在拉起独立沙盒环境...")
 
         async def cb(url):
@@ -406,6 +463,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家状态")
     async def mihome_status(self, event: AstrMessageEvent):
+        """查看登录、共享设备与最近控制状态"""
         s = await self.client.get_login_status()
         last_device = s["last_control_device"] or "无"
         last_result = "未发生" if not s["last_control_device"] else ("失败" if s["last_control_error"] else "成功")
@@ -421,6 +479,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登出")
     async def mihome_logout(self, event: AstrMessageEvent):
+        """清除米家登录凭证与本地状态"""
         yield event.plain_result("⏳ 正在登出...")
         try:
             ok = await self.client.logout()
@@ -432,6 +491,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("刷新米家")
     async def refresh_mihome_devices(self, event: AstrMessageEvent):
+        """同步米家设备列表并刷新 DID、model 缓存"""
         yield event.plain_result("⏳ 正在同步设备列表...")
         device_map = self._parse_device_map()
 
@@ -478,6 +538,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家场景列表")
     async def mihome_scene_list(self, event: AstrMessageEvent):
+        """同步并列出可执行的米家云端场景"""
         yield event.plain_result("⏳ 正在同步米家云端场景列表...")
         try:
             scenes = await self.client.get_scenes()
@@ -505,6 +566,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家场景")
     async def mihome_scene_run(self, event: AstrMessageEvent):
+        """按场景名称或 scene_id 执行米家云端场景"""
         msg = event.message_str.strip()
         cmd_prefix = r"^/?米家场景\s*"
         content = re.sub(cmd_prefix, "", msg).strip()
@@ -560,6 +622,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家详情")
     async def mihome_device_detail(self, event: AstrMessageEvent):
+        """查看指定米家设备的能力与实时状态"""
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
 
@@ -730,19 +793,20 @@ class MiHomeControlPlugin(Star):
             logger.error(f"[MiHome] 获取属性异常: {e}")
             yield event.plain_result(f"❌ 内部处理异常: {e}")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("米家帮助")
+    @filter.command("米家帮助", alias={"mihome_help", "mihomehelp"})
     async def mihome_control_help(self, event: AstrMessageEvent):
-        device_map = self._parse_device_map()
-        category_map = self._parse_category_map()
+        """查看米家插件指令总览，或按设备别名查看控制示例"""
 
         msg = event.message_str.strip()
-        cmd_prefix = r"^/?米家帮助\s*"
+        cmd_prefix = r"^/?(?:米家帮助|mihome_help|mihomehelp)\s*"
         content = re.sub(cmd_prefix, "", msg).strip()
 
         if not content:
-            yield event.plain_result("❌ 缺少参数。\n格式：/米家帮助 [设备别名]\n示例：/米家帮助 净化器")
+            yield event.plain_result(self._render_command_help())
             return
+
+        device_map = self._parse_device_map()
+        category_map = self._parse_category_map()
 
         try:
             parts = shlex.split(content)
@@ -830,6 +894,7 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家控制")
     async def control_mihome_device(self, event: AstrMessageEvent):
+        """控制指定米家设备的开关、属性或动作"""
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
 
