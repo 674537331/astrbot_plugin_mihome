@@ -41,6 +41,10 @@ pip install mijiaAPI
 
 ## 📖 使用指南
 
+发送 `/米家帮助`（英文别名：`/mihome_help`）可随时查看完整指令总览；发送 `/米家帮助 [设备别名]` 可查看设备专属控制示例。
+
+如果同时安装了 [astrbot_plugin_help](https://github.com/Kylerupinski/astrbot_plugin_help)，公开的 `/米家帮助` 会自动显示在 `/helps` 菜单中。该帮助插件默认隐藏管理员命令；如需在 `/helps` 中展开显示本插件的其他命令，请在其配置中开启 `show_all_cmds`。
+
 <details>
 <summary><b>🚀 快速上手：从零到控制你的第一台设备 (点击展开)</b></summary>
 
@@ -138,6 +142,7 @@ pip install mijiaAPI
 * `/米家状态`：查看插件当前登录状态、共享设备异常与最近一次控制记录。
 
 ### 📡 设备查询
+* `/米家帮助`：查看本插件完整指令总览，英文别名为 `/mihome_help`。
 * `/刷新米家`：同步云端设备列表，输出带 **DID 与 model** 的设备总览，并刷新本地设备档案缓存。
 * `/米家详情 [设备别名]`：查看该设备详情。
   * 优先级 1（型号精准匹配）：若设备型号命中内置`MODEL_PROFILES`，展现最完美的专属属性与翻译。
