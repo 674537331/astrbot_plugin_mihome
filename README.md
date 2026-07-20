@@ -544,7 +544,11 @@ LLM 据此知道"模式只能填 制冷/制热/除湿/送风/自动"，避免幻
 - 每个操作独立成功/失败，失败项返回 `valid_values` 或 `valid_props` 提示供 LLM 自纠错
 
 #### 4. `call_mihome_action`（执行设备动作）
-传入 `device_alias` + `action`，执行触发性动作（如 `start_sweep` 开始清扫）。与 `control_mihome_device` 的区别：action 是触发性的无返回值，prop 是状态设置可读写。
+传入 `device_alias` + `action`，执行触发性动作。支持参数化动作（v7.4.3+）：通过 `params` 字段传入 JSON 数组。
+
+- 无参动作（如 `play`/`pause`/`start_sweep`）：不传 `params` 或传空字符串
+- 带参动作（如 `play-text` TTS 播放、`execute-text-directive` 执行文本指令）：`params` 传入 JSON 数组，如 `'["你好世界"]'`。插件内部自动构造米家 spec 规范的 `in` 数组格式（v7.4.4 修复）
+- 与 `control_mihome_device` 的区别：action 是触发性的，value 是表达性的；prop 是状态设置，可读写回读
 
 ---
 
@@ -567,6 +571,32 @@ LLM 一次提参调 control_mihome_device(
   ↓
 LLM 汇总回复用户："已开启客厅空调，制冷模式 26 度"
 ```
+
+后续每次控制只需 1 次 LLM 调用 + 1 次工具执行。
+
+### 🎤 TTS / 音箱编排示例
+
+```
+用户："让卧室音箱说一句'你好世界'"
+  ↓
+LLM 调 inspect_mihome_device(device_alias="卧室音箱")
+  -> [类别: 音箱类别, 可写: 音量/静音..., 动作: play/pause/播放文本/执行文本指令...]
+  ↓
+LLM 一次提参调 call_mihome_action(
+       device_alias="卧室音箱",
+       action="播放文本",
+       params='["你好世界"]'
+     )
+  -> ✅ 音箱 TTS 播放"你好世界"
+```
+
+### 📝 v7.4.x 迭代改进
+
+- **v7.4.4**：修复带参动作的参数格式——改用米家 spec 规范的 `in` 数组（`[{piid, value}]`）而非 `value` 字段
+- **v7.4.3**：`call_mihome_action` 新增 `params` 参数支持（JSON 数组），LLM 可传 `'["文本"]'` 执行 TTS 等带参动作
+- **v7.4.2**：新增音箱类别（CATEGORY_SPEAKER）+ `xiaomi.wifispeaker.oh2p` 型号适配；修复 `rw` 字段解析 bug（`"rw"` 字符串格式未正确识别）
+- **v7.4.1**：IR 设备自动检测与拒制；JSONDecodeError 友好提示；未适配设备云端动态能力发现兜底；model 名启发式分类
+- **v7.4.0**：4 个 LLM 控制 Tool 首次发布（list/inspect/control/action）
 
 后续每次控制只需 1 次 LLM 调用 + 1 次工具执行。
 
