@@ -745,6 +745,45 @@ class MiHomeClient:
         except Exception as e:
             self._handle_control_exception(e, device_name or did)
 
+    async def run_action_with_in(
+        self,
+        did: str,
+        action: str,
+        in_params: List[Dict[str, Any]],
+        device_name: str = "",
+    ) -> None:
+        """带参数动作调用，使用米家 spec 的 in 数组格式。
+
+        in_params 是 [{piid: 1, value: "text"}, ...] 形式，
+        会被加到 method["in"] 字段发给云端。
+        """
+        self._check_idle()
+        self._check_api()
+        try:
+            async with self._api_lock:
+                logger.info(
+                    f"[MiHome] 执行带参动作: {device_name} ({did}) -> "
+                    f"action={action} in={in_params}"
+                )
+                device = await asyncio.wait_for(
+                    asyncio.to_thread(self._prepare_device_sync, did),
+                    timeout=15.0,
+                )
+                # 直接构造正确的 method（绕过 device.run_action 的错误格式）
+                if action not in device.action_list:
+                    raise MiHomeControlError(f"action_not_found:{action}")
+                act = device.action_list[action]
+                method = act.method.copy()
+                method["did"] = did
+                method["in"] = in_params
+                await asyncio.wait_for(
+                    asyncio.to_thread(self.api.run_action, method),
+                    timeout=15.0,
+                )
+            self.data_manager.update_state(last_control_error="", last_control_device=device_name or did)
+        except Exception as e:
+            self._handle_control_exception(e, device_name or did)
+
     def _handle_scene_exception(self, e: Exception, scene_name: str):
         if isinstance(e, asyncio.TimeoutError):
             self.data_manager.update_state(last_scene_error="场景执行超时", last_scene_name=scene_name)

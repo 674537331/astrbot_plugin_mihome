@@ -467,13 +467,22 @@ class CallMihomeActionParamsTests(unittest.TestCase):
         return plugin
 
     def test_params_json_string_parsed_to_list(self):
-        """params 字符串被解析为 list 并传给 client.run_action。"""
+        """params 字符串被解析为 list 并转换为 in_params 传给 client.run_action_with_in。
+
+        play-text 是 PARAMETERIZED_ACTIONS 中的已知带参动作，会走 run_action_with_in
+        路径，绕过 device.run_action 的错误格式。
+        """
         import asyncio
         plugin = self._make_plugin_with_mock_client()
-        # Make run_action a no-op async function
-        async def mock_run_action(*args, **kwargs):
-            pass
-        plugin.client.run_action = mock_run_action
+        captured = {}
+
+        # Make run_action_with_in a no-op async function (play-text is parameterized)
+        async def mock_run_action_with_in(did, action, in_params, device_name=""):
+            captured['in_params'] = in_params
+            captured['action'] = action
+            captured['did'] = did
+
+        plugin.client.run_action_with_in = mock_run_action_with_in
 
         event = MagicMock()
         # Call the actual tool method
@@ -483,8 +492,11 @@ class CallMihomeActionParamsTests(unittest.TestCase):
             action="播放文本",
             params='["你好世界"]',
         ))
-        self.assertIn("执行动作: play-text", result)
+        self.assertIn("执行带参动作: play-text", result)
         self.assertIn("你好世界", result)
+        # Verify in_params is correctly constructed per PARAMETERIZED_ACTIONS schema
+        self.assertEqual(captured['action'], "play-text")
+        self.assertEqual(captured['in_params'], [{"piid": 1, "value": "你好世界"}])
 
     def test_empty_params_treated_as_no_params(self):
         """空 params 字符串等价于不传 params。"""
@@ -537,6 +549,37 @@ class CallMihomeActionParamsTests(unittest.TestCase):
             params='"just a string not array"',
         ))
         self.assertIn("必须是 JSON 数组", result)
+
+
+class ParameterizedActionsConstantTests(unittest.TestCase):
+    """测试 PARAMETERIZED_ACTIONS 常量。"""
+
+    def test_constant_exists(self):
+        from astrbot_plugin_mihome.main import PARAMETERIZED_ACTIONS
+        self.assertIsInstance(PARAMETERIZED_ACTIONS, dict)
+
+    def test_play_text_schema(self):
+        from astrbot_plugin_mihome.main import PARAMETERIZED_ACTIONS
+        self.assertIn("play-text", PARAMETERIZED_ACTIONS)
+        schema = PARAMETERIZED_ACTIONS["play-text"]
+        self.assertEqual(len(schema), 1)
+        self.assertEqual(schema[0]["piid"], 1)
+        self.assertEqual(schema[0]["type"], "string")
+
+    def test_execute_text_directive_schema(self):
+        from astrbot_plugin_mihome.main import PARAMETERIZED_ACTIONS
+        self.assertIn("execute-text-directive", PARAMETERIZED_ACTIONS)
+        schema = PARAMETERIZED_ACTIONS["execute-text-directive"]
+        self.assertEqual(len(schema), 2)
+        self.assertEqual(schema[0]["piid"], 1)
+        self.assertEqual(schema[0]["type"], "string")
+        self.assertEqual(schema[1]["piid"], 2)
+        self.assertEqual(schema[1]["type"], "bool")
+
+    def test_run_action_with_in_method_exists(self):
+        """验证 MiHomeClient 有 run_action_with_in 方法。"""
+        from astrbot_plugin_mihome.mihome_client import MiHomeClient
+        self.assertTrue(hasattr(MiHomeClient, "run_action_with_in"))
 
 
 if __name__ == "__main__":

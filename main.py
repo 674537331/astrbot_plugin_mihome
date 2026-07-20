@@ -101,8 +101,21 @@ READONLY_ALLOWED_CATEGORIES = {
     CATEGORY_GAS_SENSOR,
 }
 
+# 已知带参动作的 in_params schema（基于米家 spec 抓取）
+# LLM 调用 call_mihome_action 时传 params JSON 数组，本插件按顺序映射到 piid
+# 格式: {"action_key": [{"piid": X, "type": "string|bool|int"}, ...]}
+PARAMETERIZED_ACTIONS = {
+    "play-text": [
+        {"piid": 1, "type": "string", "name": "text-content", "description": "要播放的文本"},
+    ],
+    "execute-text-directive": [
+        {"piid": 1, "type": "string", "name": "text-content", "description": "要执行的文本指令"},
+        {"piid": 2, "type": "bool", "name": "silent-execution", "description": "是否静默执行"},
+    ],
+}
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.3")
+
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.4")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -1771,20 +1784,27 @@ class MiHomeControlPlugin(Star):
             param_hints = []
             for a in cap["actions"]:
                 key = a.get("key", "")
-                # 已知需要参数的动作（基于米家常见 spec 模式）
-                if key in ("play-text", "execute-text-directive", "play-music", "play-radio"):
+                if key in PARAMETERIZED_ACTIONS:
                     param_hints.append(key)
             if param_hints:
-                lines.append("💡 部分动作可能需要参数，调用 call_mihome_action 时通过 params 字段传入 JSON 数组：")
+                lines.append("💡 部分动作需要参数（params 字段传 JSON 数组）：")
                 for k in param_hints:
-                    if k == "play-text":
-                        lines.append(f'   - {k}: 传入要播放的文本，如 \'["你好世界"]\'')
-                    elif k == "execute-text-directive":
-                        lines.append(f'   - {k}: 传入要执行的文本指令，如 \'["把空调打开"]\'')
-                    elif k == "play-music":
-                        lines.append(f'   - {k}: 传入歌曲名/歌手，如 \'["周杰伦 晴天"]\'')
-                    elif k == "play-radio":
-                        lines.append(f'   - {k}: 传入电台标识或名称，如 \'["music_fm"]\'')
+                    schema = PARAMETERIZED_ACTIONS[k]
+                    schema_str = ", ".join(
+                        f"{s['piid']}={s['name']}({s['type']})" for s in schema
+                    )
+                    lines.append(f"   - {k}: 参数顺序为 [{schema_str}]")
+                    # 给出示例
+                    example_values = []
+                    for s in schema:
+                        if s["type"] == "string":
+                            example_values.append('"文本"')
+                        elif s["type"] == "bool":
+                            example_values.append("false")
+                        elif s["type"] == "int":
+                            example_values.append("1")
+                    example_str = "[" + ", ".join(example_values) + "]"
+                    lines.append(f"     示例: params='{example_str}'")
                 lines.append("")
         else:
             lines.append("可执行动作: (无)")
@@ -2000,6 +2020,58 @@ class MiHomeControlPlugin(Star):
                     f'正确格式: ["你好世界"] 或 [50, 100]（无参动作留空）'
                 )
 
+        # 如果是已知带参动作，用 in 数组格式调用（绕过 device.run_action 的错误格式）
+        if eng_action in PARAMETERIZED_ACTIONS:
+            param_schema = PARAMETERIZED_ACTIONS[eng_action]
+            if params_list is None:
+                return (
+                    f"❌ 动作 {eng_action} 需要参数，请通过 params 传入 JSON 数组。\n"
+                    f"参数 schema: {param_schema}"
+                )
+            if len(params_list) != len(param_schema):
+                return (
+                    f"❌ 动作 {eng_action} 需要 {len(param_schema)} 个参数，"
+                    f"实际传入 {len(params_list)} 个。\n"
+                    f"参数 schema: {param_schema}"
+                )
+            # 构造 in 数组，按 schema 顺序映射
+            in_params = []
+            for i, val in enumerate(params_list):
+                schema = param_schema[i]
+                # 类型转换
+                if schema["type"] == "bool":
+                    if isinstance(val, str):
+                        val = val.lower() in ("true", "1", "yes", "开")
+                    else:
+                        val = bool(val)
+                elif schema["type"] == "int":
+                    val = int(val)
+                elif schema["type"] == "string":
+                    val = str(val)
+                in_params.append({"piid": schema["piid"], "value": val})
+
+            try:
+                await self.client.run_action_with_in(did, eng_action, in_params, alias)
+                return f"✅ 已对设备 {alias} 执行带参动作: {eng_action}（in: {in_params}）"
+            except MiHomeAuthError as e:
+                return f"❌ 鉴权失效: {e}\n请执行 /米家登录 重新授权。"
+            except MiHomeControlError as e:
+                err_str = str(e)
+                if err_str == "device_not_found":
+                    return f"❌ 云端找不到设备 {alias}。"
+                elif err_str == "device_rejected":
+                    return f"❌ 设备 {alias} 拒绝执行动作 {eng_action}（参数可能不合法）。"
+                elif err_str == "cloud_no_response":
+                    return f"❌ 米家云端无响应（设备可能离线）。"
+                elif err_str.startswith("action_not_found"):
+                    return f"❌ 设备不支持动作: {eng_action}"
+                return f"❌ 动作执行失败: {err_str}"
+            except MiHomeClientError as e:
+                return f"❌ API/网络异常: {e}"
+            except Exception as e:
+                return f"❌ 内部错误: {e}"
+
+        # 非已知带参动作：用旧的无参调用路径
         try:
             await self.client.run_action(did, eng_action, alias, params=params_list)
             if params_list:
