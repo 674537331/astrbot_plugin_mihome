@@ -543,15 +543,14 @@ class MiHomeControlPlugin(Star):
 
         失败时返回 ok=False 并附 valid_values 或 valid_props 供 LLM 自纠错。
 
-        注：val_map 取类别级（如 CATEGORY_AC 的 "制冷": "cool"），返回 LLM 友好的
-        英文枚举；具体型号的云端 API 数值（如 1）由调用方在 set_property 时再做映射。
+        注：val_map 取型号级（如 lumi.acpartner.mcn02 的 "制冷": 1），返回云端
+        API 所需的整数值，与 /米家控制 命令行为一致。
         """
         configured_category = normalize_category(category)
         effective_category = resolve_effective_category(model=model, category=configured_category)
 
         prop_map = get_device_prop_map(model=model, category=effective_category)
-        # val_map 用类别级：返回 LLM 友好的英文枚举（"cool"），而非型号级云端 API 数值（1）
-        val_map = get_device_val_map(model="", category=effective_category)
+        val_map = get_device_val_map(model=model, category=effective_category)
         writable_keys = get_device_detail_writable_keys(model=model, category=effective_category)
         reverse_prop_map = {v: k for k, v in prop_map.items()}
 
@@ -562,7 +561,7 @@ class MiHomeControlPlugin(Star):
         elif prop_str in reverse_prop_map.values() or prop_str in writable_keys:
             eng_prop = prop_str
         else:
-            valid_props = sorted(set(reverse_prop_map.values()) | set(writable_keys))
+            valid_props = sorted(set(prop_map.keys()))  # Chinese prop names
             return {
                 "ok": False,
                 "error": f"未知属性: {prop}",

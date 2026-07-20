@@ -142,19 +142,20 @@ class TranslateControlOperationTests(unittest.TestCase):
             value="制冷",
         )
         self.assertEqual(result["prop"], "mode")
-        self.assertEqual(result["value"], "cool")
+        self.assertEqual(result["value"], 1)  # Integer cloud value (matches /米家控制 behavior)
         self.assertTrue(result["ok"])
 
-    def test_passes_through_english_prop_and_value(self):
+    def test_passes_through_integer_cloud_value(self):
+        """LLM 直接传整数 cloud API 值时应该透传。"""
         plugin = self._make_plugin()
         result = plugin._translate_control_operation(
             model="lumi.acpartner.mcn02",
             category="",
             prop="mode",
-            value="cool",
+            value=1,  # Integer cloud value
         )
         self.assertEqual(result["prop"], "mode")
-        self.assertEqual(result["value"], "cool")
+        self.assertEqual(result["value"], 1)
         self.assertTrue(result["ok"])
 
     def test_returns_valid_values_hint_when_value_invalid(self):
