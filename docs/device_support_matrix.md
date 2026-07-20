@@ -44,3 +44,48 @@
 
 > 💡 **提示**：即使设备不在列表中，系统内置了自动嗅探与全局兜底机制，基础开关控制通常仍可使用。  
 > 对于版本 7.0.0 之后，我们更推荐使用兼容性更强、更安全的**米家场景**来食用本插件。
+
+## LLM Tool 体系（v7.4.0 新增）
+
+### 只读类 Tool（默认开启后可用）
+- `list_configured_mihome_aliases` - 列出已配置别名（旧版）
+- `read_mihome_device_status_by_alias` - 按别名读实时状态（旧版）
+- `list_cached_mihome_scenes` - 列出缓存的场景（旧版）
+- `execute_mihome_scene` - 执行场景（旧版）
+
+### 控制类 Tool（需开启 control_tool.enable，默认 admin_only=true）
+- `list_mihome_devices` - 列出所有设备 + 能力概览
+- `inspect_mihome_device` - 查看某设备完整能力 schema（含可选值枚举）
+- `control_mihome_device` - 一次提参下发多个属性设置操作（JSON 数组）
+- `call_mihome_action` - 执行设备动作
+
+### 典型 LLM 编排流程
+
+```
+用户："好热，帮我开空调"
+  ↓
+LLM 调 list_mihome_devices
+  -> [客厅空调(lumi.acpartner.mcn02, 可写: 开关/模式/温度/风速/扫风)]
+  ↓
+LLM 调 inspect_mihome_device(device_alias="客厅空调")
+  -> [开关可选值: 开/关, 模式可选值: 自动/制冷/除湿/制热/送风, 温度范围: 16~30]
+  ↓
+LLM 一次提参调 control_mihome_device(
+       device_alias="客厅空调",
+       operations='[{"prop":"开关","value":"开"},{"prop":"模式","value":"制冷"},{"prop":"温度","value":"26"}]'
+     )
+  -> 所有操作成功下发
+  ↓
+LLM 汇总回复用户："已开启客厅空调，制冷模式 26 度"
+```
+
+### 错误自纠错示例
+
+```
+LLM 调 control_mihome_device(device_alias="客厅空调", operations='[{"prop":"模式","value":"送风模式"}]')
+  -> 失败: 无效值"送风模式"
+     可选值: 自动, 制冷, 除湿, 制热, 送风
+  ↓
+LLM 根据可选值提示，重新调 control_mihome_device(operations='[{"prop":"模式","value":"送风"}]')
+  -> 成功
+```

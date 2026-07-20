@@ -3,7 +3,7 @@ display_name: 米家控制
 desc: AstrBot 的米家云端智能管家插件
 help: |
   发送 /米家帮助 查看完整指令总览；发送 /米家帮助 [设备别名] 查看设备专属控制示例。
-version: v7.3.0
+version: v7.4.0
 astrbot_version: ">=4.0.0"
 support_platforms:
   - aiocqhttp
