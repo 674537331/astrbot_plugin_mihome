@@ -118,6 +118,22 @@ class HelpContractTests(unittest.TestCase):
         docstring = ast.get_docstring(tool_methods[0]) or ""
         self.assertIn("Args:", docstring, "list_mihome_devices 必须包含 Args 文档段")
 
+    def test_inspect_mihome_device_tool_exists_with_args_doc(self):
+        tool_methods = [
+            node for node in self.plugin_class.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and any(
+                decorator_name(d) == "filter.llm_tool"
+                and self._extract_llm_tool_name(d) == "inspect_mihome_device"
+                for d in node.decorator_list
+            )
+        ]
+        self.assertEqual(len(tool_methods), 1, "inspect_mihome_device 工具必须存在且唯一")
+        docstring = ast.get_docstring(tool_methods[0]) or ""
+        self.assertIn("Args:", docstring)
+        # 必须有 device_alias 参数文档
+        self.assertIn("device_alias", docstring)
+
 
 if __name__ == "__main__":
     unittest.main()

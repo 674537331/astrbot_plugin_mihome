@@ -1526,5 +1526,80 @@ class MiHomeControlPlugin(Star):
         lines.append("- 调用 call_mihome_action 执行设备动作")
         return "\n".join(lines)
 
+    @filter.llm_tool(name="inspect_mihome_device")
+    async def inspect_mihome_device_tool(self, event: AstrMessageEvent, device_alias: str) -> str:
+        """
+        查看指定设备的完整能力 schema，包含每个可写属性的合法值枚举和提示。
+        使用说明：
+        1. 在调用 control_mihome_device 前，建议先调用本工具确认该设备支持哪些属性和值域。
+        2. 返回内容包含每个属性的 key（用于 control_mihome_device 的 prop 参数）和可选值清单。
+        3. 若属性 hint 字段非空，则该属性可能是数值类型，hint 中通常包含取值范围（如 16~30）。
+        Args:
+            device_alias(string): 设备别名，必须来自 list_mihome_devices 返回的清单
+        """
+        deny_msg = self._check_control_tool_access(event)
+        if deny_msg:
+            return deny_msg
+
+        device_map = self._parse_device_map()
+        category_map = self._parse_category_map()
+
+        alias = str(device_alias or "").strip()
+        if alias not in device_map:
+            return (
+                f"未找到设备别名: {alias}\n"
+                f"请先调用 list_mihome_devices 查看可用设备清单。"
+            )
+
+        did = device_map[alias]
+        configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        model = self._get_model_by_did(did)
+        effective_category = resolve_effective_category(model=model, category=configured_category)
+        cloud_name = self._get_cloud_name_by_did(did)
+
+        cap = self._aggregate_device_capabilities(
+            alias=alias, did=did, model=model, category=effective_category,
+        )
+
+        lines = [
+            f"设备能力 schema: {alias}",
+            f"DID: {did}",
+            f"型号: {model or '未知'}",
+            f"类别: {effective_category}",
+        ]
+        if cloud_name and cloud_name != alias:
+            lines.append(f"云端名: {cloud_name}")
+        lines.append("")
+
+        if cap["writable_props"]:
+            lines.append("可写属性:")
+            for p in cap["writable_props"]:
+                line = f"- {p['name']} (key={p['key']}"
+                if p["valid_values"]:
+                    line += f", 可选值: {', '.join(str(v) for v in p['valid_values'])}"
+                if p["hint"]:
+                    line += f", 提示: {p['hint']}"
+                line += ")"
+                lines.append(line)
+            lines.append("")
+
+        if cap["readable_props"]:
+            lines.append("可读属性（用于 read_mihome_device_status_by_alias）:")
+            for p in cap["readable_props"]:
+                lines.append(f"- {p['name']} (key={p['key']})")
+            lines.append("")
+
+        if cap["actions"]:
+            lines.append("可执行动作（用于 call_mihome_action）:")
+            for a in cap["actions"]:
+                lines.append(f"- {a['name']} (key={a['key']})")
+            lines.append("")
+        else:
+            lines.append("可执行动作: (无)")
+            lines.append("")
+
+        lines.append("说明：control_mihome_device 调用时，prop 可填中文 name 或英文 key，value 可填中文值或英文值。")
+        return "\n".join(lines)
+
     async def terminate(self):
         await self.client.terminate()
