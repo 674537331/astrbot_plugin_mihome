@@ -1,1 +1,1 @@
-mijiaAPI==3.0.5
+mijiaAPI==3.2.0
