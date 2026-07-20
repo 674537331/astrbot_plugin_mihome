@@ -1470,7 +1470,7 @@ class MiHomeControlPlugin(Star):
         except Exception as e:
             return f"内部错误：{e}"
 
-    @filter.llm_tool("list_mihome_devices")
+    @filter.llm_tool(name="list_mihome_devices")
     async def list_mihome_devices_tool(self, event: AstrMessageEvent) -> str:
         """
         列出当前米家账号下已配置的所有设备，并返回每台设备的能力概览。

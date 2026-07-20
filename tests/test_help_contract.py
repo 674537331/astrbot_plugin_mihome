@@ -30,6 +30,29 @@ class HelpContractTests(unittest.TestCase):
             if isinstance(node, ast.ClassDef) and node.name == "MiHomeControlPlugin"
         )
 
+    @staticmethod
+    def _extract_llm_tool_name(decorator):
+        """Extract the tool name from a @filter.llm_tool decorator.
+
+        Handles both positional form @filter.llm_tool("name") and
+        keyword form @filter.llm_tool(name="name").
+        Returns None if no name is found.
+        """
+        # Positional form: @filter.llm_tool("name")
+        if decorator.args:
+            try:
+                return ast.literal_eval(decorator.args[0])
+            except (ValueError, SyntaxError):
+                return None
+        # Keyword form: @filter.llm_tool(name="name")
+        for keyword in decorator.keywords:
+            if keyword.arg == "name":
+                try:
+                    return ast.literal_eval(keyword.value)
+                except (ValueError, SyntaxError):
+                    return None
+        return None
+
     def _command_handlers(self):
         for node in self.plugin_class.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -87,8 +110,7 @@ class HelpContractTests(unittest.TestCase):
             if isinstance(node, ast.AsyncFunctionDef)
             and any(
                 decorator_name(d) == "filter.llm_tool"
-                and d.args
-                and ast.literal_eval(d.args[0]) == "list_mihome_devices"
+                and self._extract_llm_tool_name(d) == "list_mihome_devices"
                 for d in node.decorator_list
             )
         ]
