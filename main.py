@@ -471,9 +471,8 @@ class MiHomeControlPlugin(Star):
         configured_category = normalize_category(category)
         effective_category = resolve_effective_category(model=model, category=configured_category)
 
-        prop_map = get_device_prop_map(model=model, category=effective_category)
         display_map = get_device_display_map(model=model, category=effective_category)
-        reverse_prop_map = {v: k for k, v in prop_map.items()}
+        reverse_prop_map = get_reverse_prop_map(model=model, category=effective_category)
 
         writable_keys = get_device_detail_writable_keys(model=model, category=effective_category)
         readable_keys = get_device_detail_readable_keys(model=model, category=effective_category)
@@ -499,7 +498,11 @@ class MiHomeControlPlugin(Star):
             for k in readable_keys
         ]
 
-        actions = [{"key": a, "name": a} for a in action_keys]
+        reverse_action_map = get_reverse_action_map(model=model, category=effective_category)
+        actions = [
+            {"key": a, "name": reverse_action_map.get(a, a)}
+            for a in action_keys
+        ]
 
         return {
             "alias": alias,
