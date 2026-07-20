@@ -456,6 +456,75 @@ class MiHomeControlPlugin(Star):
         lines.append("说明：本结果为实时读取，不使用缓存；且仅允许从已配置别名中检索设备。")
         return "\n".join(lines)
 
+    def _aggregate_device_capabilities(
+        self,
+        alias: str,
+        did: str,
+        model: str,
+        category: str,
+    ) -> Dict[str, Any]:
+        """聚合一台设备的完整能力 schema，供 LLM Tool 返回。
+
+        优先用 model profile，未命中则回退到 category profile，
+        再回退到全局 prop_map/value_map。返回结构化 dict。
+        """
+        configured_category = normalize_category(category)
+        effective_category = resolve_effective_category(model=model, category=configured_category)
+
+        prop_map = get_device_prop_map(model=model, category=effective_category)
+        display_map = get_device_display_map(model=model, category=effective_category)
+        reverse_prop_map = {v: k for k, v in prop_map.items()}
+
+        writable_keys = get_device_detail_writable_keys(model=model, category=effective_category)
+        readable_keys = get_device_detail_readable_keys(model=model, category=effective_category)
+        action_keys = get_device_detail_actions(model=model, category=effective_category)
+        help_examples = get_device_help_examples(model=model, category=effective_category)
+        help_hints = get_device_help_hints(model=model, category=effective_category)
+
+        writable_props: List[Dict[str, Any]] = []
+        for eng_key in writable_keys:
+            cn_name = reverse_prop_map.get(eng_key, eng_key)
+            # help_examples 的 key 是中文 prop 名（如"模式"），value 是中文值列表（如["制冷","制热"]）
+            valid_values = self._collect_valid_values(cn_name, help_examples)
+            hint = help_hints.get(cn_name, "")
+            writable_props.append({
+                "key": eng_key,
+                "name": cn_name,
+                "valid_values": valid_values,
+                "hint": hint,
+            })
+
+        readable_props = [
+            {"key": k, "name": display_map.get(k, k)}
+            for k in readable_keys
+        ]
+
+        actions = [{"key": a, "name": a} for a in action_keys]
+
+        return {
+            "alias": alias,
+            "did": did,
+            "model": model,
+            "category": effective_category,
+            "writable_props": writable_props,
+            "readable_props": readable_props,
+            "actions": actions,
+        }
+
+    @staticmethod
+    def _collect_valid_values(
+        cn_prop_name: str,
+        help_examples: Dict[str, List[str]],
+    ) -> List[str]:
+        """从 help_examples 中取该 prop 的合法中文值列表。
+
+        help_examples 的 key 是中文 prop 名（如"模式"），value 是中文值列表（如["制冷","制热"]）。
+        直接返回中文值列表，因为 LLM 调 control_mihome_device 时可传中文。
+        """
+        if cn_prop_name in help_examples:
+            return [str(v) for v in help_examples[cn_prop_name]]
+        return []
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登录")
     async def mihome_login(self, event: AstrMessageEvent):
