@@ -321,5 +321,109 @@ class GuessCategoryFromModelTests(unittest.TestCase):
         self.assertEqual(plugin._guess_category_from_model(""), "")
 
 
+class ParseRwFieldTests(unittest.TestCase):
+    """测试 MiHomeClient._parse_rw_field 静态方法。"""
+
+    def test_string_rw_returns_both_true(self):
+        from astrbot_plugin_mihome.mihome_client import MiHomeClient
+        self.assertEqual(MiHomeClient._parse_rw_field("rw"), (True, True))
+
+    def test_string_r_returns_read_only(self):
+        from astrbot_plugin_mihome.mihome_client import MiHomeClient
+        self.assertEqual(MiHomeClient._parse_rw_field("r"), (True, False))
+
+    def test_string_w_returns_write_only(self):
+        from astrbot_plugin_mihome.mihome_client import MiHomeClient
+        self.assertEqual(MiHomeClient._parse_rw_field("w"), (False, True))
+
+    def test_uppercase_rw_works(self):
+        from astrbot_plugin_mihome.mihome_client import MiHomeClient
+        self.assertEqual(MiHomeClient._parse_rw_field("RW"), (True, True))
+
+    def test_list_format_read_write(self):
+        from astrbot_plugin_mihome.mihome_client import MiHomeClient
+        self.assertEqual(MiHomeClient._parse_rw_field(["read", "write"]), (True, True))
+
+    def test_list_format_read_only(self):
+        from astrbot_plugin_mihome.mihome_client import MiHomeClient
+        self.assertEqual(MiHomeClient._parse_rw_field(["read"]), (True, False))
+
+    def test_empty_string_returns_false_false(self):
+        from astrbot_plugin_mihome.mihome_client import MiHomeClient
+        self.assertEqual(MiHomeClient._parse_rw_field(""), (False, False))
+
+    def test_none_returns_false_false(self):
+        from astrbot_plugin_mihome.mihome_client import MiHomeClient
+        self.assertEqual(MiHomeClient._parse_rw_field(None), (False, False))
+
+
+class SpeakerCategoryTests(unittest.TestCase):
+    """测试音箱类别适配。"""
+
+    def _make_plugin(self):
+        from astrbot_plugin_mihome.main import MiHomeControlPlugin
+        plugin = MiHomeControlPlugin.__new__(MiHomeControlPlugin)
+        plugin.config = {}
+        plugin.data_manager = MagicMock()
+        plugin.client = MagicMock()
+        plugin.action_alias = {}
+        return plugin
+
+    def test_speaker_category_constant_exists(self):
+        from astrbot_plugin_mihome.device_profiles import CATEGORY_SPEAKER
+        self.assertEqual(CATEGORY_SPEAKER, "音箱类别")
+
+    def test_speaker_category_in_valid_categories(self):
+        from astrbot_plugin_mihome.device_profiles import VALID_CATEGORIES, CATEGORY_SPEAKER
+        self.assertIn(CATEGORY_SPEAKER, VALID_CATEGORIES)
+
+    def test_speaker_model_profile_exists(self):
+        from astrbot_plugin_mihome.device_profiles import MODEL_PROFILES
+        self.assertIn("xiaomi.wifispeaker.oh2p", MODEL_PROFILES)
+        profile = MODEL_PROFILES["xiaomi.wifispeaker.oh2p"]
+        self.assertEqual(profile.get("category"), "音箱类别")
+        # Verify key props are mapped
+        prop_map = profile.get("prop_map", {})
+        self.assertIn("音量", prop_map)
+        self.assertEqual(prop_map["音量"], "volume")
+
+    def test_speaker_category_profile_has_chinese_action_map(self):
+        from astrbot_plugin_mihome.device_profiles import CATEGORY_PROFILES, CATEGORY_SPEAKER
+        profile = CATEGORY_PROFILES[CATEGORY_SPEAKER]
+        action_map = profile.get("action_map", {})
+        # Verify key actions are mapped
+        self.assertEqual(action_map.get("播放"), "play")
+        self.assertEqual(action_map.get("暂停"), "pause")
+        self.assertEqual(action_map.get("播放文本"), "play-text")
+        self.assertEqual(action_map.get("播放音乐"), "play-music")
+
+    def test_aggregate_capabilities_for_speaker_model(self):
+        """验证 _aggregate_device_capabilities 对音箱型号返回完整中文 schema。"""
+        plugin = self._make_plugin()
+        result = plugin._aggregate_device_capabilities(
+            alias="卧室音箱",
+            did="2181495268",
+            model="xiaomi.wifispeaker.oh2p",
+            category="",
+        )
+        # Should have writable props with Chinese names
+        writable_keys = [p["key"] for p in result["writable_props"]]
+        self.assertIn("volume", writable_keys)
+        self.assertIn("mute", writable_keys)
+        # Verify Chinese name mapping
+        volume_prop = next(p for p in result["writable_props"] if p["key"] == "volume")
+        self.assertEqual(volume_prop["name"], "音量")
+        # Should have actions
+        action_keys = [a["key"] for a in result["actions"]]
+        self.assertIn("play", action_keys)
+        self.assertIn("play-text", action_keys)
+
+    def test_guess_category_detects_speaker_model(self):
+        """验证 _guess_category_from_model 识别音箱型号。"""
+        plugin = self._make_plugin()
+        self.assertEqual(plugin._guess_category_from_model("xiaomi.wifispeaker.oh2p"), "音箱类别")
+        self.assertEqual(plugin._guess_category_from_model("xiaomi.wifispeaker.l09a"), "音箱类别")
+
+
 if __name__ == "__main__":
     unittest.main()

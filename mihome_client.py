@@ -89,6 +89,23 @@ class MiHomeClient:
             return ""
         return f" {unit}"
 
+    @staticmethod
+    def _parse_rw_field(rw: Any) -> tuple:
+        """解析 mijiaAPI prop 的 rw 字段，返回 (is_readable, is_writable)。
+
+        支持两种格式：
+        - 字符串: "r", "w", "rw"（米家 spec 标准单字符缩写）
+        - 列表: ["read", "write"]（旧版兼容）
+        """
+        if isinstance(rw, str):
+            rw_str = rw.lower()
+        elif isinstance(rw, (list, tuple, set)):
+            rw_str = "".join(str(x).lower() for x in rw)
+        else:
+            return (False, False)
+
+        return ("r" in rw_str, "w" in rw_str)
+
     def _prepare_device_sync(self, did: str):
         self.api.login()
         if getattr(self.api, "device_list", None) is None:
@@ -509,16 +526,11 @@ class MiHomeClient:
                     if norm_k not in all_props:
                         all_props.append(norm_k)
 
-                    rw = getattr(p_info, "rw", [])
-                    rw_set = set()
-                    if isinstance(rw, (list, tuple, set)):
-                        rw_set = {str(x).lower() for x in rw}
-                    elif isinstance(rw, str):
-                        rw_set = {rw.lower()}
+                    is_readable, is_writable = self._parse_rw_field(getattr(p_info, "rw", []))
 
-                    if "write" in rw_set and norm_k not in writable:
+                    if is_writable and norm_k not in writable:
                         writable.append(norm_k)
-                    if "read" in rw_set and norm_k not in readable:
+                    if is_readable and norm_k not in readable:
                         readable.append(norm_k)
 
                 for raw_k in action_list.keys():
@@ -599,14 +611,7 @@ class MiHomeClient:
                     if norm_k in seen_writable:
                         continue
 
-                    rw = getattr(p_info, "rw", [])
-                    is_writable = False
-                    if isinstance(rw, (list, tuple, set)):
-                        rw_set = {str(x).lower() for x in rw}
-                        if "write" in rw_set:
-                            is_writable = True
-                    elif isinstance(rw, str) and "write" in rw.lower():
-                        is_writable = True
+                    is_readable_rw, is_writable = self._parse_rw_field(getattr(p_info, "rw", []))
 
                     if is_writable:
                         seen_writable.add(norm_k)

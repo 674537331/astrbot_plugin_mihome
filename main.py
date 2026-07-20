@@ -28,6 +28,7 @@ from .device_profiles import (
     CATEGORY_VACUUM,
     CATEGORY_WATER_HEATER,
     CATEGORY_ROUTER,
+    CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
@@ -94,13 +95,14 @@ READONLY_ALLOWED_CATEGORIES = {
     CATEGORY_VACUUM,
     CATEGORY_WATER_HEATER,
     CATEGORY_ROUTER,
+    CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.1")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.2")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -543,6 +545,7 @@ class MiHomeControlPlugin(Star):
             CATEGORY_AC, CATEGORY_PURIFIER, CATEGORY_FAN,
             CATEGORY_AIR_FRYER, CATEGORY_TH_SENSOR, CATEGORY_BODY_SCALE,
             CATEGORY_VACUUM, CATEGORY_WATER_HEATER, CATEGORY_ROUTER,
+            CATEGORY_SPEAKER,
             CATEGORY_SWITCH, CATEGORY_DOOR_SENSOR, CATEGORY_GAS_SENSOR,
         )
 
@@ -579,6 +582,9 @@ class MiHomeControlPlugin(Star):
         # 路由器
         if m.startswith("xiaomi.router.") or m.startswith("miwifi."):
             return CATEGORY_ROUTER
+        # 音箱类
+        if m.startswith("xiaomi.wifispeaker.") or m.startswith("xiaomi.soundbox.") or m.startswith("xiaomi.audio."):
+            return CATEGORY_SPEAKER
         # 开关/插座类
         if any(m.startswith(p) for p in (
             "cuco.plug.", "chuangmi.plug.", "chuangmi.switch.",

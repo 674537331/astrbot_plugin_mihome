@@ -15,6 +15,7 @@ CATEGORY_BODY_SCALE = "体脂秤类别"
 CATEGORY_VACUUM = "扫地机类别"
 CATEGORY_WATER_HEATER = "热水器类别"
 CATEGORY_ROUTER = "路由器类别"
+CATEGORY_SPEAKER = "音箱类别"
 CATEGORY_SWITCH = "开关类别"
 CATEGORY_DOOR_SENSOR = "门磁传感器类别"
 CATEGORY_GAS_SENSOR = "燃气传感器类别"
@@ -31,6 +32,7 @@ VALID_CATEGORIES = {
     CATEGORY_VACUUM,
     CATEGORY_WATER_HEATER,
     CATEGORY_ROUTER,
+    CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
@@ -696,6 +698,74 @@ CATEGORY_PROFILES = {
         "help_examples": {},
         "action_examples": [],
         "help_hints": {},
+    },
+
+    CATEGORY_SPEAKER: {
+        "prop_map": {
+            "音量": "volume",
+            "静音": "mute",
+            "麦克风静音": "microphone-mute",
+            "睡眠模式": "sleep-mode",
+            "勿扰": "no-disturb",
+        },
+        "value_map": {
+            "开": True,
+            "关": False,
+        },
+        "display_map": {
+            "volume": "音量",
+            "mute": "静音状态",
+            "microphone-mute": "麦克风静音状态",
+            "sleep-mode": "睡眠模式",
+            "no-disturb": "勿扰状态",
+            "playing-state": "播放状态",
+            "audio-id": "当前音频",
+        },
+        "detail_writable": [
+            "volume",
+            "mute",
+            "microphone-mute",
+            "sleep-mode",
+            "no-disturb",
+        ],
+        "detail_readable": ["playing-state", "audio-id"],
+        "detail_actions": [
+            "play",
+            "pause",
+            "previous",
+            "next",
+            "stop-alarm",
+            "wake-up",
+            "play-radio",
+            "play-text",
+            "execute-text-directive",
+            "play-music",
+            "tv-switchon",
+        ],
+        "action_map": {
+            "播放": "play",
+            "暂停": "pause",
+            "上一首": "previous",
+            "下一首": "next",
+            "停止闹钟": "stop-alarm",
+            "唤醒": "wake-up",
+            "播放电台": "play-radio",
+            "播放文本": "play-text",
+            "执行文本指令": "execute-text-directive",
+            "播放音乐": "play-music",
+            "打开电视": "tv-switchon",
+        },
+        "help_examples": {
+            "音量": ["50", "30", "80"],
+            "静音": ["开", "关"],
+            "麦克风静音": ["开", "关"],
+            "睡眠模式": ["开", "关"],
+            "勿扰": ["开", "关"],
+        },
+        "action_examples": ["播放", "暂停", "播放音乐", "播放文本", "下一首"],
+        "help_hints": {
+            "音量": "范围 5-100 的整数",
+        },
     },
 
     CATEGORY_SWITCH: {
@@ -1831,6 +1901,77 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
             "重启",
         ],
         "help_hints": {},
+    },
+
+    # 新增：小米智能音箱 OH2P
+    "xiaomi.wifispeaker.oh2p": {
+        "category": CATEGORY_SPEAKER,
+        "hidden_props": [],
+        "prop_map": {
+            "音量": "volume",
+            "静音": "mute",
+            "麦克风静音": "microphone-mute",
+            "睡眠模式": "sleep-mode",
+            "勿扰": "no-disturb",
+        },
+        "value_map": {
+            "开": True,
+            "关": False,
+        },
+        "display_map": {
+            "volume": "音量",
+            "mute": "静音状态",
+            "microphone-mute": "麦克风静音状态",
+            "sleep-mode": "睡眠模式",
+            "no-disturb": "勿扰状态",
+            "playing-state": "播放状态",
+            "audio-id": "当前音频",
+        },
+        "detail_writable": [
+            "volume",
+            "mute",
+            "microphone-mute",
+            "sleep-mode",
+            "no-disturb",
+        ],
+        "detail_readable": ["playing-state", "audio-id"],
+        "detail_actions": [
+            "play",
+            "pause",
+            "previous",
+            "next",
+            "stop-alarm",
+            "wake-up",
+            "play-radio",
+            "play-text",
+            "execute-text-directive",
+            "play-music",
+            "tv-switchon",
+        ],
+        "action_map": {
+            "播放": "play",
+            "暂停": "pause",
+            "上一首": "previous",
+            "下一首": "next",
+            "停止闹钟": "stop-alarm",
+            "唤醒": "wake-up",
+            "播放电台": "play-radio",
+            "播放文本": "play-text",
+            "执行文本指令": "execute-text-directive",
+            "播放音乐": "play-music",
+            "打开电视": "tv-switchon",
+        },
+        "help_examples": {
+            "音量": ["50", "30", "80"],
+            "静音": ["开", "关"],
+            "麦克风静音": ["开", "关"],
+            "睡眠模式": ["开", "关"],
+            "勿扰": ["开", "关"],
+        },
+        "action_examples": ["播放", "暂停", "播放音乐", "播放文本", "下一首"],
+        "help_hints": {
+            "音量": "范围 5-100 的整数",
+        },
     },
 }
 
