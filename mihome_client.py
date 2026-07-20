@@ -2,6 +2,7 @@
 import re
 import os
 import sys
+import json
 import asyncio
 from datetime import datetime
 from typing import Dict, Callable, Awaitable, Union, Any, Optional, List
@@ -740,6 +741,14 @@ class MiHomeClient:
         elif isinstance(e, RequestException):
             self.data_manager.update_state(last_scene_error=f"网络异常: {type(e).__name__}", last_scene_name=scene_name)
             raise MiHomeClientError(f"网络请求失败: {type(e).__name__}") from e
+        elif isinstance(e, json.JSONDecodeError):
+            # 米家云端返回非 JSON 响应（通常是场景失败、网络异常或 IR 设备触发失败）
+            logger.warning(f"[MiHome] 场景云端响应非 JSON: {e} (scene={scene_name})")
+            self.data_manager.update_state(
+                last_scene_error="云端无响应(场景可能不存在/网络异常)",
+                last_scene_name=scene_name,
+            )
+            raise MiHomeSceneError("cloud_no_response") from e
         else:
             logger.error(f"[MiHome] 场景异常: type={type(e).__name__}, detail={e}")
             self.data_manager.update_state(last_scene_error=f"内部错误: {e}", last_scene_name=scene_name)
@@ -767,6 +776,14 @@ class MiHomeClient:
         elif isinstance(e, RequestException):
             self.data_manager.update_state(last_control_error=f"网络异常: {type(e).__name__}", last_control_device=device_name)
             raise MiHomeClientError(f"网络请求失败: {type(e).__name__}") from e
+        elif isinstance(e, json.JSONDecodeError):
+            # 米家云端返回非 JSON 响应（通常是设备离线、不可达，或 IR 设备不支持 set_devices_prop）
+            logger.warning(f"[MiHome] 云端响应非 JSON: {e} (device={device_name})")
+            self.data_manager.update_state(
+                last_control_error="云端无响应(设备可能离线/IR设备/失联)",
+                last_control_device=device_name,
+            )
+            raise MiHomeControlError("cloud_no_response") from e
         else:
             logger.error(f"[MiHome] 控制异常: type={type(e).__name__}, detail={e}")
             self.data_manager.update_state(last_control_error=f"内部错误: {e}", last_control_device=device_name)

@@ -100,7 +100,7 @@ READONLY_ALLOWED_CATEGORIES = {
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.0")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.1")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -471,6 +471,13 @@ class MiHomeControlPlugin(Star):
         configured_category = normalize_category(category)
         effective_category = resolve_effective_category(model=model, category=configured_category)
 
+        # 静态 profile 未命中时，启发式从 model 名推断类别
+        if (not get_device_prop_map(model=model, category=effective_category)
+            and effective_category == CATEGORY_NONE):
+            guessed = self._guess_category_from_model(model)
+            if guessed:
+                effective_category = guessed
+
         display_map = get_device_display_map(model=model, category=effective_category)
         reverse_prop_map = get_reverse_prop_map(model=model, category=effective_category)
 
@@ -504,7 +511,8 @@ class MiHomeControlPlugin(Star):
             for a in action_keys
         ]
 
-        return {
+        is_ir = self._is_ir_device(did, model)
+        result = {
             "alias": alias,
             "did": did,
             "model": model,
@@ -512,7 +520,128 @@ class MiHomeControlPlugin(Star):
             "writable_props": writable_props,
             "readable_props": readable_props,
             "actions": actions,
+            "is_ir_device": is_ir,
         }
+        if is_ir:
+            result["unsupported_reason"] = "红外遥控设备，不支持云端直接控制，请使用场景执行（execute_mihome_scene）"
+        return result
+
+    @staticmethod
+    def _is_ir_device(did: str, model: str) -> bool:
+        """检测是否为红外遥控设备（不支持 set_devices_prop API）。"""
+        did_str = str(did or "")
+        model_str = str(model or "").lower()
+        return did_str.startswith("ir.") or model_str.startswith("miir.")
+
+    @staticmethod
+    def _guess_category_from_model(model: str) -> str:
+        """从未知 model 名前缀启发式推断设备类别。
+
+        Returns: 类别字符串（如 "空调类别"），无法识别返回 CATEGORY_NONE
+        """
+        from .device_profiles import (
+            CATEGORY_AC, CATEGORY_PURIFIER, CATEGORY_FAN,
+            CATEGORY_AIR_FRYER, CATEGORY_TH_SENSOR, CATEGORY_BODY_SCALE,
+            CATEGORY_VACUUM, CATEGORY_WATER_HEATER, CATEGORY_ROUTER,
+            CATEGORY_SWITCH, CATEGORY_DOOR_SENSOR, CATEGORY_GAS_SENSOR,
+        )
+
+        m = str(model or "").lower()
+        if not m:
+            return ""
+
+        # 空调类
+        if any(m.startswith(p) for p in (
+            "zhimi.airp.", "lumi.acpartner.", "aircondition.", "miir.aircondition.",
+        )):
+            return CATEGORY_AC
+        # 净化器类
+        if any(m.startswith(p) for p in ("zhimi.airpurifier.", "deerma.airp.", "airpurifier.")):
+            return CATEGORY_PURIFIER
+        # 风扇类
+        if m.startswith("zhimi.fan.") or m.startswith("dmaker.fan."):
+            return CATEGORY_FAN
+        # 空气炸锅类
+        if m.startswith("careli.fryer."):
+            return CATEGORY_AIR_FRYER
+        # 温湿度计
+        if m.startswith("miaomiaoce.sensor_ht.") or m.startswith("sensor_ht."):
+            return CATEGORY_TH_SENSOR
+        # 体脂秤
+        if m.startswith("yunmai.scales."):
+            return CATEGORY_BODY_SCALE
+        # 扫地机
+        if m.startswith("xiaomi.vacuum.") or m.startswith("dreame.vacuum.") or m.startswith("roborock.vacuum."):
+            return CATEGORY_VACUUM
+        # 热水器
+        if m.startswith("yunmi.waterpuri.") or m.startswith("waterpuri."):
+            return CATEGORY_WATER_HEATER
+        # 路由器
+        if m.startswith("xiaomi.router.") or m.startswith("miwifi."):
+            return CATEGORY_ROUTER
+        # 开关/插座类
+        if any(m.startswith(p) for p in (
+            "cuco.plug.", "chuangmi.plug.", "chuangmi.switch.",
+            "zimi.switch.", "switch.", "plug.",
+        )):
+            return CATEGORY_SWITCH
+        # 门磁
+        if m.startswith("lumi.sensor_magnet.") or m.startswith("sensor_magnet."):
+            return CATEGORY_DOOR_SENSOR
+        # 燃气传感器
+        if m.startswith("lumi.sensor_natgas.") or m.startswith("sensor_natgas."):
+            return CATEGORY_GAS_SENSOR
+
+        return ""
+
+    async def _enrich_with_dynamic_capabilities(
+        self,
+        cap: Dict[str, Any],
+        did: str,
+    ) -> Dict[str, Any]:
+        """当静态 profile 为空时，从米家云端动态拉取设备能力作为兜底。
+
+        动态返回的是原始英文 key，无中文翻译和值域枚举。
+        会标记 raw_mode=True 让 LLM 知道这些 prop 没有完整 schema。
+        """
+        # 静态 profile 已有内容则不兜底
+        if cap.get("writable_props") or cap.get("readable_props") or cap.get("actions"):
+            return cap
+
+        if cap.get("is_ir_device"):
+            # IR 设备不调云端 API（会失败），直接返回原 cap
+            return cap
+
+        try:
+            cloud_cap = await self.client.get_device_capabilities(did)
+            if cloud_cap.get("__error__"):
+                # 云端拉取失败，保留错误信息
+                cap["dynamic_error"] = cloud_cap["__error__"]
+                return cap
+
+            writable_keys = cloud_cap.get("writable", [])
+            readable_keys = cloud_cap.get("readable", [])
+            action_keys = cloud_cap.get("actions", [])
+
+            # 转换为 schema 格式（英文 key 直接作为 name）
+            cap["writable_props"] = [
+                {"key": k, "name": k, "valid_values": [], "hint": ""}
+                for k in writable_keys
+            ]
+            cap["readable_props"] = [
+                {"key": k, "name": k}
+                for k in readable_keys
+            ]
+            cap["actions"] = [
+                {"key": a, "name": a}
+                for a in action_keys
+            ]
+            cap["raw_mode"] = True  # 标记为原始模式
+        except Exception as e:
+            logger.warning(f"[MiHome] 动态能力发现失败: {e}")
+            cap["dynamic_error"] = str(e)
+
+        return cap
 
     @staticmethod
     def _collect_valid_values(
@@ -1511,12 +1640,24 @@ class MiHomeControlPlugin(Star):
             cap = self._aggregate_device_capabilities(
                 alias=alias, did=did, model=model, category=effective_category,
             )
+
+            ir_warning = ""
+            if cap.get("is_ir_device"):
+                ir_warning = " ⚠️ 红外遥控设备(仅支持场景控制)"
+
             writable_summary = ", ".join(
                 f"{p['name']}({p['key']})" for p in cap["writable_props"]
-            ) or "(无可写属性)"
-            action_summary = ", ".join(a["key"] for a in cap["actions"]) or "(无动作)"
+            )
+            if not cap["writable_props"]:
+                if cap.get("is_ir_device"):
+                    writable_summary = "(红外设备不支持直接控制)"
+                else:
+                    writable_summary = "(未适配，调用 inspect_mihome_device 查看)"
+            action_summary = ", ".join(a["key"] for a in cap["actions"])
+            if not cap["actions"] and not cap.get("is_ir_device"):
+                action_summary = "(未适配，调用 inspect_mihome_device 查看)"
 
-            lines.append(f"• {alias}")
+            lines.append(f"• {alias}{ir_warning}")
             if cloud_name and cloud_name != alias:
                 lines.append(f"  云端名: {cloud_name}")
             lines.append(f"  型号: {model or '未知'}")
@@ -1565,6 +1706,8 @@ class MiHomeControlPlugin(Star):
         cap = self._aggregate_device_capabilities(
             alias=alias, did=did, model=model, category=effective_category,
         )
+        # 静态 profile 为空时，从云端动态拉取
+        cap = await self._enrich_with_dynamic_capabilities(cap, did)
 
         lines = [
             f"设备能力 schema: {alias}",
@@ -1574,6 +1717,25 @@ class MiHomeControlPlugin(Star):
         ]
         if cloud_name and cloud_name != alias:
             lines.append(f"云端名: {cloud_name}")
+
+        if cap.get("is_ir_device"):
+            lines.append("")
+            lines.append("⚠️ " + cap.get("unsupported_reason", "红外遥控设备，不支持直接控制"))
+            lines.append("建议：在米家 APP 中创建手动执行场景，然后调用 execute_mihome_scene 触发")
+            lines.append("")
+
+        if cap.get("raw_mode"):
+            lines.append("")
+            lines.append("ℹ️ 该设备未在插件画像库中适配，以下为云端原始能力（英文 key）：")
+            lines.append("   - LLM 可直接用英文 key 调用 control_mihome_device")
+            lines.append("   - 无值域枚举，传值前建议先调 read_mihome_device_status_by_alias 看当前值")
+            lines.append("   - 建议在 device_category_map 配置该设备类别以获得中文翻译")
+            lines.append("")
+
+        if cap.get("dynamic_error"):
+            lines.append(f"⚠️ 云端能力拉取失败: {cap['dynamic_error']}")
+            lines.append("")
+
         lines.append("")
 
         if cap["writable_props"]:
@@ -1656,6 +1818,13 @@ class MiHomeControlPlugin(Star):
         model = self._get_model_by_did(did)
         effective_category = resolve_effective_category(model=model, category=configured_category)
 
+        if self._is_ir_device(did, model):
+            return (
+                f"⚠️ 设备 {alias} 是红外遥控设备，不支持云端直接控制。\n"
+                f"建议：在米家 APP 中创建手动执行场景，然后调用 execute_mihome_scene 触发。\n"
+                f"如需查看已有场景，请调用 list_cached_mihome_scenes。"
+            )
+
         executed: List[Dict[str, Any]] = []
         for idx, op in enumerate(ops_list, 1):
             if not isinstance(op, dict):
@@ -1708,6 +1877,8 @@ class MiHomeControlPlugin(Star):
                     hint = "云端找不到设备"
                 elif err_str == "device_rejected":
                     hint = "设备拒绝执行（可能离线或参数非法）"
+                elif err_str == "cloud_no_response":
+                    hint = "米家云端无响应（设备可能离线、IR 设备不支持、或网络异常）"
                 executed.append({
                     "prop": eng_prop, "value": eng_value,
                     "status": "failed",
@@ -1763,6 +1934,12 @@ class MiHomeControlPlugin(Star):
         model = self._get_model_by_did(did)
         effective_category = resolve_effective_category(model=model, category=configured_category)
 
+        if self._is_ir_device(did, model):
+            return (
+                f"⚠️ 设备 {alias} 是红外遥控设备，不支持云端动作调用。\n"
+                f"建议：在米家 APP 中创建手动执行场景，然后调用 execute_mihome_scene 触发。"
+            )
+
         action_map = get_device_action_map(model=model, category=effective_category)
         reverse_action_map = {v: k for k, v in action_map.items()}
         detail_actions = get_device_detail_actions(model=model, category=effective_category)
@@ -1791,6 +1968,11 @@ class MiHomeControlPlugin(Star):
                 return f"❌ 云端找不到设备 {alias}。"
             elif err_str == "device_rejected":
                 return f"❌ 设备 {alias} 拒绝执行动作 {eng_action}（可能离线或不支持）。"
+            elif err_str == "cloud_no_response":
+                return (
+                    f"❌ 米家云端无响应（设备可能离线或 IR 设备不支持）。\n"
+                    f"建议：1) 检查设备是否在线  2) IR 设备请改用 execute_mihome_scene"
+                )
             return f"❌ 动作执行失败: {err_str}"
         except MiHomeClientError as e:
             return f"❌ API/网络异常: {e}"

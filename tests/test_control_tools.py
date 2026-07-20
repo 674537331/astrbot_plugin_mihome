@@ -258,5 +258,68 @@ class FormatControlResultTests(unittest.TestCase):
         self.assertIn("模式", result)
 
 
+class IsIrDeviceTests(unittest.TestCase):
+    """测试 _is_ir_device 静态方法。"""
+
+    def _make_plugin(self):
+        from astrbot_plugin_mihome.main import MiHomeControlPlugin
+        plugin = MiHomeControlPlugin.__new__(MiHomeControlPlugin)
+        plugin.config = {}
+        plugin.data_manager = MagicMock()
+        plugin.client = MagicMock()
+        plugin.action_alias = {}
+        return plugin
+
+    def test_detects_ir_did_prefix(self):
+        plugin = self._make_plugin()
+        self.assertTrue(plugin._is_ir_device("ir.2078708785907654658", "anything"))
+
+    def test_detects_miir_model_prefix(self):
+        plugin = self._make_plugin()
+        self.assertTrue(plugin._is_ir_device("12345", "miir.aircondition.ir02"))
+
+    def test_returns_false_for_native_device(self):
+        plugin = self._make_plugin()
+        self.assertFalse(plugin._is_ir_device("573207651", "cuco.plug.v3"))
+
+    def test_returns_false_for_empty_inputs(self):
+        plugin = self._make_plugin()
+        self.assertFalse(plugin._is_ir_device("", ""))
+
+
+class GuessCategoryFromModelTests(unittest.TestCase):
+    """测试 _guess_category_from_model 启发式识别。"""
+
+    def _make_plugin(self):
+        from astrbot_plugin_mihome.main import MiHomeControlPlugin
+        plugin = MiHomeControlPlugin.__new__(MiHomeControlPlugin)
+        plugin.config = {}
+        plugin.data_manager = MagicMock()
+        plugin.client = MagicMock()
+        plugin.action_alias = {}
+        return plugin
+
+    def test_detects_smart_plug(self):
+        plugin = self._make_plugin()
+        self.assertEqual(plugin._guess_category_from_model("cuco.plug.v3"), "开关类别")
+        self.assertEqual(plugin._guess_category_from_model("chuangmi.plug.v1"), "开关类别")
+
+    def test_detects_ac_partner(self):
+        plugin = self._make_plugin()
+        self.assertEqual(plugin._guess_category_from_model("lumi.acpartner.mcn02"), "空调类别")
+
+    def test_detects_vacuum(self):
+        plugin = self._make_plugin()
+        self.assertEqual(plugin._guess_category_from_model("xiaomi.vacuum.ov21cn"), "扫地机类别")
+
+    def test_returns_empty_for_unknown_model(self):
+        plugin = self._make_plugin()
+        self.assertEqual(plugin._guess_category_from_model("unknown.brand.xyz"), "")
+
+    def test_returns_empty_for_empty_input(self):
+        plugin = self._make_plugin()
+        self.assertEqual(plugin._guess_category_from_model(""), "")
+
+
 if __name__ == "__main__":
     unittest.main()
