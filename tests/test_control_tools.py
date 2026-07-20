@@ -13,7 +13,22 @@ _astrbot_api = types.ModuleType("astrbot.api")
 _astrbot_api.logger = MagicMock()
 _astrbot_api.AstrBotConfig = dict
 _astrbot_api.event = types.ModuleType("astrbot.api.event")
-_astrbot_api.event.filter = MagicMock()
+
+
+def _passthrough_decorator(*args, **kwargs):
+    """让 filter.llm_tool / filter.command 等装饰器直接返回原函数，便于测试调用。"""
+    def decorator(func):
+        return func
+    return decorator
+
+
+_filter_mock = MagicMock()
+_filter_mock.llm_tool = _passthrough_decorator
+_filter_mock.command = _passthrough_decorator
+_filter_mock.regex = _passthrough_decorator
+_filter_mock.permission_type = _passthrough_decorator
+_filter_mock.on_decorating_result = _passthrough_decorator
+_astrbot_api.event.filter = _filter_mock
 _astrbot_api.event.AstrMessageEvent = MagicMock
 _astrbot_api.star = types.ModuleType("astrbot.api.star")
 
@@ -423,6 +438,105 @@ class SpeakerCategoryTests(unittest.TestCase):
         plugin = self._make_plugin()
         self.assertEqual(plugin._guess_category_from_model("xiaomi.wifispeaker.oh2p"), "音箱类别")
         self.assertEqual(plugin._guess_category_from_model("xiaomi.wifispeaker.l09a"), "音箱类别")
+
+
+class CallMihomeActionParamsTests(unittest.TestCase):
+    """测试 call_mihome_action_tool 的 params 参数处理。
+
+    这些测试通过 mock client 验证参数解析逻辑，不调真实云端。
+    """
+
+    def _make_plugin_with_mock_client(self):
+        """创建带 mock client 的 plugin 实例，便于验证调用参数。"""
+        import asyncio
+        from astrbot_plugin_mihome.main import MiHomeControlPlugin
+        plugin = MiHomeControlPlugin.__new__(MiHomeControlPlugin)
+        plugin.config = {
+            "device_map": '{"卧室音箱": "2181495268"}',
+            "device_category_map": '{"卧室音箱": "音箱类别"}',
+            "control_tool": {"enable": True, "admin_only": False},
+        }
+        plugin.data_manager = MagicMock()
+        plugin.client = MagicMock()
+        # Mock state to return model and cloud_name
+        plugin.data_manager.load_state.return_value = {
+            "did_to_model": {"2181495268": "xiaomi.wifispeaker.oh2p"},
+            "did_to_name": {"2181495268": "Xiaomi 智能音箱 Pro"},
+        }
+        plugin.action_alias = {}
+        return plugin
+
+    def test_params_json_string_parsed_to_list(self):
+        """params 字符串被解析为 list 并传给 client.run_action。"""
+        import asyncio
+        plugin = self._make_plugin_with_mock_client()
+        # Make run_action a no-op async function
+        async def mock_run_action(*args, **kwargs):
+            pass
+        plugin.client.run_action = mock_run_action
+
+        event = MagicMock()
+        # Call the actual tool method
+        result = asyncio.run(plugin.call_mihome_action_tool(
+            event=event,
+            device_alias="卧室音箱",
+            action="播放文本",
+            params='["你好世界"]',
+        ))
+        self.assertIn("执行动作: play-text", result)
+        self.assertIn("你好世界", result)
+
+    def test_empty_params_treated_as_no_params(self):
+        """空 params 字符串等价于不传 params。"""
+        import asyncio
+        plugin = self._make_plugin_with_mock_client()
+        captured = {}
+        async def mock_run_action(did, action, device_name="", params=None):
+            captured['params'] = params
+        plugin.client.run_action = mock_run_action
+
+        event = MagicMock()
+        asyncio.run(plugin.call_mihome_action_tool(
+            event=event,
+            device_alias="卧室音箱",
+            action="播放",
+            params="",
+        ))
+        self.assertIsNone(captured['params'])
+
+    def test_invalid_params_json_returns_error(self):
+        """无效 JSON 返回友好错误。"""
+        import asyncio
+        plugin = self._make_plugin_with_mock_client()
+        async def mock_run_action(*args, **kwargs):
+            pass
+        plugin.client.run_action = mock_run_action
+
+        event = MagicMock()
+        result = asyncio.run(plugin.call_mihome_action_tool(
+            event=event,
+            device_alias="卧室音箱",
+            action="播放文本",
+            params="not valid json",
+        ))
+        self.assertIn("JSON 解析失败", result)
+
+    def test_params_not_list_returns_error(self):
+        """params 不是数组时返回错误。"""
+        import asyncio
+        plugin = self._make_plugin_with_mock_client()
+        async def mock_run_action(*args, **kwargs):
+            pass
+        plugin.client.run_action = mock_run_action
+
+        event = MagicMock()
+        result = asyncio.run(plugin.call_mihome_action_tool(
+            event=event,
+            device_alias="卧室音箱",
+            action="播放文本",
+            params='"just a string not array"',
+        ))
+        self.assertIn("必须是 JSON 数组", result)
 
 
 if __name__ == "__main__":

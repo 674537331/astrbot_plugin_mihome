@@ -102,7 +102,7 @@ READONLY_ALLOWED_CATEGORIES = {
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.2")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.3")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -1767,6 +1767,25 @@ class MiHomeControlPlugin(Star):
             for a in cap["actions"]:
                 lines.append(f"- {a['name']} (key={a['key']})")
             lines.append("")
+            # 提示带参动作的用法
+            param_hints = []
+            for a in cap["actions"]:
+                key = a.get("key", "")
+                # 已知需要参数的动作（基于米家常见 spec 模式）
+                if key in ("play-text", "execute-text-directive", "play-music", "play-radio"):
+                    param_hints.append(key)
+            if param_hints:
+                lines.append("💡 部分动作可能需要参数，调用 call_mihome_action 时通过 params 字段传入 JSON 数组：")
+                for k in param_hints:
+                    if k == "play-text":
+                        lines.append(f'   - {k}: 传入要播放的文本，如 \'["你好世界"]\'')
+                    elif k == "execute-text-directive":
+                        lines.append(f'   - {k}: 传入要执行的文本指令，如 \'["把空调打开"]\'')
+                    elif k == "play-music":
+                        lines.append(f'   - {k}: 传入歌曲名/歌手，如 \'["周杰伦 晴天"]\'')
+                    elif k == "play-radio":
+                        lines.append(f'   - {k}: 传入电台标识或名称，如 \'["music_fm"]\'')
+                lines.append("")
         else:
             lines.append("可执行动作: (无)")
             lines.append("")
@@ -1909,17 +1928,21 @@ class MiHomeControlPlugin(Star):
         event: AstrMessageEvent,
         device_alias: str,
         action: str,
+        params: str = "",
     ) -> str:
         """
         对指定米家设备执行一个动作（action）。动作通常是触发性的，如 start_sweep（开始清扫）、stop_sweep（停止清扫）。
+        部分动作需要参数（如 play-text 需要文本内容、play-music 可能需要歌曲名）。
         使用说明：
         1. 调用前请先通过 list_mihome_devices 或 inspect_mihome_device 确认设备支持哪些动作。
         2. action 参数可填中文（如"开始清扫"）或英文 key（如"start_sweep"）。
-        3. 本工具不支持传参动作参数；如需带参数的动作，请使用 /米家控制 命令。
-        4. 与 control_mihome_device 区别：action 是触发性的、无返回值；prop 是状态设置，可读写。
+        3. 对于需要参数的动作（如 play-text、execute-text-directive、play-music），通过 params 传入 JSON 数组。
+        4. 无参动作（如 play、pause、start_sweep）可不传 params 或传空字符串。
+        5. 与 control_mihome_device 区别：action 是触发性的，可能带返回值；prop 是状态设置，可读写。
         Args:
             device_alias(string): 设备别名，必须来自 list_mihome_devices 返回清单
             action(string): 动作名称（中文或英文 key）
+            params(string): 可选。动作参数的 JSON 数组字符串，例如播放文本时传 '["你好世界"]'。无参动作留空或不传。
         """
         deny_msg = self._check_control_tool_access(event)
         if deny_msg:
@@ -1963,8 +1986,24 @@ class MiHomeControlPlugin(Star):
                 f"可用动作: {', '.join(valid_actions) if valid_actions else '(无)'}"
             )
 
+        # 解析 params JSON（可选）
+        params_list: Optional[List[Any]] = None
+        if params:
+            try:
+                parsed = json.loads(params) if isinstance(params, str) else params
+                if not isinstance(parsed, list):
+                    return "params 必须是 JSON 数组，例如 [\"你好\"]"
+                params_list = parsed
+            except json.JSONDecodeError as e:
+                return (
+                    f"params JSON 解析失败: {e}\n"
+                    f'正确格式: ["你好世界"] 或 [50, 100]（无参动作留空）'
+                )
+
         try:
-            await self.client.run_action(did, eng_action, alias)
+            await self.client.run_action(did, eng_action, alias, params=params_list)
+            if params_list:
+                return f"✅ 已对设备 {alias} 执行动作: {eng_action}（参数: {params_list}）"
             return f"✅ 已对设备 {alias} 执行动作: {eng_action}"
         except MiHomeAuthError as e:
             return f"❌ 鉴权失效: {e}\n请执行 /米家登录 重新授权。"
@@ -1973,7 +2012,11 @@ class MiHomeControlPlugin(Star):
             if err_str == "device_not_found":
                 return f"❌ 云端找不到设备 {alias}。"
             elif err_str == "device_rejected":
-                return f"❌ 设备 {alias} 拒绝执行动作 {eng_action}（可能离线或不支持）。"
+                hint = f"❌ 设备 {alias} 拒绝执行动作 {eng_action}（可能离线或不支持"
+                if params_list is None:
+                    hint += "，或该动作需要参数但未传入 params"
+                hint += "）。"
+                return hint
             elif err_str == "cloud_no_response":
                 return (
                     f"❌ 米家云端无响应（设备可能离线或 IR 设备不支持）。\n"

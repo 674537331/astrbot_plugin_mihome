@@ -712,20 +712,35 @@ class MiHomeClient:
         except Exception as e:
             self._handle_control_exception(e, device_name or did)
 
-    async def run_action(self, did: str, action: str, device_name: str = "") -> None:
+    async def run_action(
+        self,
+        did: str,
+        action: str,
+        device_name: str = "",
+        params: Optional[List[Any]] = None,
+    ) -> None:
         self._check_idle()
         self._check_api()
         try:
             async with self._api_lock:
-                logger.info(f"[MiHome] 执行动作控制: {device_name} ({did}) -> action={action}")
+                logger.info(
+                    f"[MiHome] 执行动作控制: {device_name} ({did}) -> action={action}"
+                    + (f" params={params}" if params else "")
+                )
                 device = await asyncio.wait_for(
                     asyncio.to_thread(self._prepare_device_sync, did),
                     timeout=15.0,
                 )
-                await asyncio.wait_for(
-                    asyncio.to_thread(device.run_action, action),
-                    timeout=15.0,
-                )
+                if params is not None:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(device.run_action, action, params),
+                        timeout=15.0,
+                    )
+                else:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(device.run_action, action),
+                        timeout=15.0,
+                    )
             self.data_manager.update_state(last_control_error="", last_control_device=device_name or did)
         except Exception as e:
             self._handle_control_exception(e, device_name or did)
