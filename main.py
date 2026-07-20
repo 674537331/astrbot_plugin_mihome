@@ -281,6 +281,25 @@ class MiHomeControlPlugin(Star):
     def _readonly_tool_enabled(self) -> bool:
         return bool(self.config.get("enable_readonly_tool", False))
 
+    def _control_tool_enabled(self) -> bool:
+        control_tool_cfg = self.config.get("control_tool", {})
+        if isinstance(control_tool_cfg, dict) and "enable" in control_tool_cfg:
+            return bool(control_tool_cfg.get("enable", False))
+        return False
+
+    def _control_tool_admin_only(self) -> bool:
+        control_tool_cfg = self.config.get("control_tool", {})
+        if isinstance(control_tool_cfg, dict) and "admin_only" in control_tool_cfg:
+            return bool(control_tool_cfg.get("admin_only", True))
+        return True
+
+    def _check_control_tool_access(self, event: AstrMessageEvent) -> Optional[str]:
+        if not self._control_tool_enabled():
+            return "米家设备控制 Tool 当前未启用。"
+        if self._control_tool_admin_only() and not self._event_is_admin(event):
+            return "米家设备控制 Tool 当前仅管理员可调用。"
+        return None
+
     def _get_cloud_name_by_did(self, did: str) -> str:
         state = self.data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
