@@ -38,6 +38,25 @@
       }
     }
   },
+  "control_tool": {
+    "description": "米家设备控制 LLM Tool 配置",
+    "type": "object",
+    "hint": "设备控制工具总开关与权限控制。开启后 LLM 可自主下发属性设置和动作调用，涉及物理世界副作用，请审慎使用。",
+    "items": {
+      "enable": {
+        "description": "是否启用米家设备控制 LLM Tool",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，大模型可调用 list_mihome_devices、inspect_mihome_device、control_mihome_device、call_mihome_action 四个工具，自主发现设备并下发控制。涉及物理世界操作（开关电器、调整温度等），请确保仅在受信任环境中启用。"
+      },
+      "admin_only": {
+        "description": "控制 LLM Tool 是否仅管理员可调用",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后（默认），四个控制工具仅管理员可用。关闭后所有用户都可触发，注意物理世界风险。"
+      }
+    }
+  },
   "enable_scene_tool": {
     "description": "兼容旧版本：场景 Tool 开关（请使用 scene_tool.enable）",
     "type": "bool",
