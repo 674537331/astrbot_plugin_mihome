@@ -600,6 +600,44 @@ class MiHomeControlPlugin(Star):
             "value": eng_value,
         }
 
+    def _format_control_result(self, alias: str, executed: List[Dict[str, Any]]) -> str:
+        """把 control_mihome_device 的执行结果列表格式化为 LLM 友好的多行字符串。
+
+        executed 中每一项的 status 为 'success' 或 'failed'。
+        失败项可能带 valid_values 或 valid_props 提示，供 LLM 自纠错。
+        """
+        success_count = sum(1 for e in executed if e.get("status") == "success")
+        failed_count = len(executed) - success_count
+
+        lines = [f"设备: {alias}", f"执行结果: {success_count} 成功 / {failed_count} 失败", ""]
+
+        for idx, item in enumerate(executed, 1):
+            prop = item.get("prop", "?")
+            value = item.get("value", "")
+            status = item.get("status", "unknown")
+            status_cn = "✅ 成功" if status == "success" else "❌ 失败"
+            lines.append(f"{idx}. [{status_cn}] {prop} = {value}")
+            if status != "success":
+                error = item.get("error", "")
+                if error:
+                    lines.append(f"   原因: {error}")
+                valid_values = item.get("valid_values")
+                if valid_values:
+                    lines.append(f"   可选值: {', '.join(str(v) for v in valid_values)}")
+                valid_props = item.get("valid_props")
+                if valid_props:
+                    lines.append(f"   可用属性: {', '.join(str(p) for p in valid_props)}")
+
+        lines.append("")
+        if failed_count == 0:
+            lines.append("所有操作均已成功下发至米家云端。")
+        elif success_count == 0:
+            lines.append("所有操作均失败。请根据上面的提示调整参数后重试。")
+        else:
+            lines.append("部分操作失败。可针对失败项调整参数后重试。")
+
+        return "\n".join(lines)
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登录")
     async def mihome_login(self, event: AstrMessageEvent):

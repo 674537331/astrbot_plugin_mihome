@@ -185,5 +185,64 @@ class TranslateControlOperationTests(unittest.TestCase):
         self.assertIn("模式", prop_names)
 
 
+class FormatControlResultTests(unittest.TestCase):
+    """测试 _format_control_result：把执行结果列表格式化为 LLM 友好的多行字符串。"""
+
+    def _make_plugin(self):
+        from astrbot_plugin_mihome.main import MiHomeControlPlugin
+        plugin = MiHomeControlPlugin.__new__(MiHomeControlPlugin)
+        plugin.config = {}
+        plugin.data_manager = MagicMock()
+        plugin.client = MagicMock()
+        plugin.action_alias = {}
+        return plugin
+
+    def test_all_success(self):
+        plugin = self._make_plugin()
+        executed = [
+            {"prop": "on", "value": True, "status": "success"},
+            {"prop": "mode", "value": "cool", "status": "success"},
+        ]
+        result = plugin._format_control_result(alias="客厅空调", executed=executed)
+        self.assertIn("客厅空调", result)
+        self.assertIn("成功", result)
+        self.assertIn("on", result)
+        self.assertIn("mode", result)
+
+    def test_mixed_success_and_failure(self):
+        plugin = self._make_plugin()
+        executed = [
+            {"prop": "on", "value": True, "status": "success"},
+            {
+                "prop": "mode",
+                "value": "送风模式",
+                "status": "failed",
+                "error": "无效值",
+                "valid_values": ["制冷", "制热"],
+            },
+        ]
+        result = plugin._format_control_result(alias="客厅空调", executed=executed)
+        self.assertIn("成功", result)
+        self.assertIn("失败", result)
+        self.assertIn("制冷", result)
+        self.assertIn("制热", result)
+
+    def test_all_failed(self):
+        plugin = self._make_plugin()
+        executed = [
+            {
+                "prop": "未知属性",
+                "value": "任意",
+                "status": "failed",
+                "error": "未知属性",
+                "valid_props": ["电源", "模式"],
+            },
+        ]
+        result = plugin._format_control_result(alias="测试设备", executed=executed)
+        self.assertIn("失败", result)
+        self.assertIn("电源", result)
+        self.assertIn("模式", result)
+
+
 if __name__ == "__main__":
     unittest.main()
