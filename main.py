@@ -1601,5 +1601,125 @@ class MiHomeControlPlugin(Star):
         lines.append("说明：control_mihome_device 调用时，prop 可填中文 name 或英文 key，value 可填中文值或英文值。")
         return "\n".join(lines)
 
+    @filter.llm_tool(name="control_mihome_device")
+    async def control_mihome_device_tool(
+        self,
+        event: AstrMessageEvent,
+        device_alias: str,
+        operations: str,
+    ) -> str:
+        """
+        对指定米家设备下发一个或多个属性设置操作。LLM 可一次提参完成多步控制（如同时设电源、模式、温度）。
+        使用说明：
+        1. 调用前请先通过 list_mihome_devices 或 inspect_mihome_device 确认设备别名和支持的属性。
+        2. operations 参数为 JSON 字符串数组，每项形如 {"prop": "模式", "value": "制冷"}。
+        3. prop 可填中文（如"模式"）或英文 key（如"mode"）；value 同理。
+        4. 本工具会按顺序逐个执行操作，每个操作的成功/失败独立计算。
+        5. 若某项操作失败，返回结果会附带 valid_values 或 valid_props 提示，可据此调整后重试。
+        6. 涉及物理世界操作（开关电器、调整温度等），请确保用户意图清晰。
+        Args:
+            device_alias(string): 设备别名，必须来自 list_mihome_devices 返回清单
+            operations(string): JSON 格式的操作列表，例如 [{"prop": "电源", "value": "开"}, {"prop": "模式", "value": "制冷"}, {"prop": "温度", "value": "26"}]
+        """
+        deny_msg = self._check_control_tool_access(event)
+        if deny_msg:
+            return deny_msg
+
+        device_map = self._parse_device_map()
+        category_map = self._parse_category_map()
+
+        alias = str(device_alias or "").strip()
+        if alias not in device_map:
+            return (
+                f"未找到设备别名: {alias}\n"
+                f"请先调用 list_mihome_devices 查看可用设备清单。"
+            )
+
+        # 解析 operations JSON
+        try:
+            ops_list = json.loads(operations) if isinstance(operations, str) else operations
+            if not isinstance(ops_list, list) or not ops_list:
+                return 'operations 必须是非空 JSON 数组，例如 [{"prop":"电源","value":"开"}]'
+        except json.JSONDecodeError as e:
+            return (
+                f"operations JSON 解析失败: {e}\n"
+                '正确格式: [{"prop":"电源","value":"开"}]'
+            )
+
+        did = device_map[alias]
+        configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        model = self._get_model_by_did(did)
+        effective_category = resolve_effective_category(model=model, category=configured_category)
+
+        executed: List[Dict[str, Any]] = []
+        for idx, op in enumerate(ops_list, 1):
+            if not isinstance(op, dict):
+                executed.append({
+                    "prop": f"(第{idx}项)", "value": "",
+                    "status": "failed", "error": "操作项必须是 JSON 对象",
+                })
+                continue
+
+            prop = op.get("prop", "")
+            value = op.get("value", "")
+            if not prop:
+                executed.append({
+                    "prop": f"(第{idx}项)", "value": "",
+                    "status": "failed", "error": "缺少 prop 字段",
+                })
+                continue
+
+            translation = self._translate_control_operation(
+                model=model, category=effective_category, prop=prop, value=value,
+            )
+            if not translation.get("ok"):
+                executed.append({
+                    "prop": str(prop), "value": value,
+                    "status": "failed",
+                    "error": translation.get("error", "翻译失败"),
+                    "valid_values": translation.get("valid_values"),
+                    "valid_props": translation.get("valid_props"),
+                })
+                continue
+
+            eng_prop = translation["prop"]
+            eng_value = translation["value"]
+            try:
+                await self.client.set_property(did, eng_prop, eng_value, alias)
+                executed.append({
+                    "prop": eng_prop, "value": eng_value, "status": "success",
+                })
+            except MiHomeAuthError as e:
+                executed.append({
+                    "prop": eng_prop, "value": eng_value,
+                    "status": "failed", "error": f"鉴权失效: {e}",
+                })
+                # 鉴权失败直接跳出，后续操作也会失败
+                break
+            except MiHomeControlError as e:
+                err_str = str(e)
+                hint = ""
+                if err_str == "device_not_found":
+                    hint = "云端找不到设备"
+                elif err_str == "device_rejected":
+                    hint = "设备拒绝执行（可能离线或参数非法）"
+                executed.append({
+                    "prop": eng_prop, "value": eng_value,
+                    "status": "failed",
+                    "error": hint or err_str,
+                })
+            except MiHomeClientError as e:
+                executed.append({
+                    "prop": eng_prop, "value": eng_value,
+                    "status": "failed", "error": f"API/网络异常: {e}",
+                })
+            except Exception as e:
+                executed.append({
+                    "prop": eng_prop, "value": eng_value,
+                    "status": "failed", "error": f"内部错误: {e}",
+                })
+
+        return self._format_control_result(alias=alias, executed=executed)
+
     async def terminate(self):
         await self.client.terminate()
