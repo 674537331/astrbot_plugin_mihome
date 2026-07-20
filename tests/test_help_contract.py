@@ -80,6 +80,22 @@ class HelpContractTests(unittest.TestCase):
         self.assertIsNotNone(metadata_version)
         self.assertEqual(plugin_version, metadata_version.group(1))
 
+    def test_list_mihome_devices_tool_exists_with_args_doc(self):
+        """新增的 list_mihome_devices 工具必须存在且带 Args 文档"""
+        tool_methods = [
+            node for node in self.plugin_class.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and any(
+                decorator_name(d) == "filter.llm_tool"
+                and d.args
+                and ast.literal_eval(d.args[0]) == "list_mihome_devices"
+                for d in node.decorator_list
+            )
+        ]
+        self.assertEqual(len(tool_methods), 1, "list_mihome_devices 工具必须存在且唯一")
+        docstring = ast.get_docstring(tool_methods[0]) or ""
+        self.assertIn("Args:", docstring, "list_mihome_devices 必须包含 Args 文档段")
+
 
 if __name__ == "__main__":
     unittest.main()

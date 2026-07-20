@@ -1470,5 +1470,61 @@ class MiHomeControlPlugin(Star):
         except Exception as e:
             return f"内部错误：{e}"
 
+    @filter.llm_tool("list_mihome_devices")
+    async def list_mihome_devices_tool(self, event: AstrMessageEvent) -> str:
+        """
+        列出当前米家账号下已配置的所有设备，并返回每台设备的能力概览。
+        使用说明：
+        1. 这是发现设备的第一步，调用后会返回所有 device_map 中已配置的设备清单。
+        2. 每台设备会附带可写属性和可执行动作的简短摘要，便于后续直接调用 control_mihome_device 或 call_mihome_action。
+        3. 如需查看某台设备的完整能力 schema（含 valid_values 枚举），请再调用 inspect_mihome_device。
+        4. 本工具不会读取实时状态，如需当前状态请用 read_mihome_device_status_by_alias。
+        Args:
+            (无参数)
+        """
+        deny_msg = self._check_control_tool_access(event)
+        if deny_msg:
+            return deny_msg
+
+        device_map = self._parse_device_map()
+        category_map = self._parse_category_map()
+
+        if not device_map:
+            return (
+                "当前没有已配置的米家设备别名。请先在 WebUI 插件配置的 device_map 中添加别名与 DID 映射，"
+                "并执行 /刷新米家 同步设备列表。"
+            )
+
+        lines = [f"当前已配置 {len(device_map)} 个米家设备：", ""]
+        for alias in sorted(device_map.keys()):
+            did = device_map[alias]
+            configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+            model = self._get_model_by_did(did)
+            effective_category = resolve_effective_category(model=model, category=configured_category)
+            cloud_name = self._get_cloud_name_by_did(did)
+
+            cap = self._aggregate_device_capabilities(
+                alias=alias, did=did, model=model, category=effective_category,
+            )
+            writable_summary = ", ".join(
+                f"{p['name']}({p['key']})" for p in cap["writable_props"]
+            ) or "(无可写属性)"
+            action_summary = ", ".join(a["key"] for a in cap["actions"]) or "(无动作)"
+
+            lines.append(f"• {alias}")
+            if cloud_name and cloud_name != alias:
+                lines.append(f"  云端名: {cloud_name}")
+            lines.append(f"  型号: {model or '未知'}")
+            lines.append(f"  类别: {effective_category}")
+            lines.append(f"  可写属性: {writable_summary}")
+            lines.append(f"  可执行动作: {action_summary}")
+            lines.append("")
+
+        lines.append("说明：")
+        lines.append("- 调用 inspect_mihome_device 查看完整能力 schema（含可选值枚举）")
+        lines.append("- 调用 control_mihome_device 下发属性设置（支持一次传多个操作）")
+        lines.append("- 调用 call_mihome_action 执行设备动作")
+        return "\n".join(lines)
+
     async def terminate(self):
         await self.client.terminate()
