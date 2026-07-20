@@ -1721,5 +1721,76 @@ class MiHomeControlPlugin(Star):
 
         return self._format_control_result(alias=alias, executed=executed)
 
+    @filter.llm_tool(name="call_mihome_action")
+    async def call_mihome_action_tool(
+        self,
+        event: AstrMessageEvent,
+        device_alias: str,
+        action: str,
+    ) -> str:
+        """
+        对指定米家设备执行一个动作（action）。动作通常是触发性的，如 start_sweep（开始清扫）、stop_sweep（停止清扫）。
+        使用说明：
+        1. 调用前请先通过 list_mihome_devices 或 inspect_mihome_device 确认设备支持哪些动作。
+        2. action 参数可填中文（如"开始清扫"）或英文 key（如"start_sweep"）。
+        3. 本工具不支持传参动作参数；如需带参数的动作，请使用 /米家控制 命令。
+        4. 与 control_mihome_device 区别：action 是触发性的、无返回值；prop 是状态设置，可读写。
+        Args:
+            device_alias(string): 设备别名，必须来自 list_mihome_devices 返回清单
+            action(string): 动作名称（中文或英文 key）
+        """
+        deny_msg = self._check_control_tool_access(event)
+        if deny_msg:
+            return deny_msg
+
+        device_map = self._parse_device_map()
+        category_map = self._parse_category_map()
+
+        alias = str(device_alias or "").strip()
+        if alias not in device_map:
+            return (
+                f"未找到设备别名: {alias}\n"
+                f"请先调用 list_mihome_devices 查看可用设备清单。"
+            )
+
+        did = device_map[alias]
+        configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
+        model = self._get_model_by_did(did)
+        effective_category = resolve_effective_category(model=model, category=configured_category)
+
+        action_map = get_device_action_map(model=model, category=effective_category)
+        reverse_action_map = {v: k for k, v in action_map.items()}
+        detail_actions = get_device_detail_actions(model=model, category=effective_category)
+
+        action_str = str(action or "").strip()
+        # 翻译 action
+        if action_str in action_map:
+            eng_action = action_map[action_str]
+        elif action_str in reverse_action_map.values() or action_str in detail_actions:
+            eng_action = action_str
+        else:
+            valid_actions = sorted(set(reverse_action_map.values()) | set(detail_actions))
+            return (
+                f"设备 {alias} 不支持动作: {action_str}\n"
+                f"可用动作: {', '.join(valid_actions) if valid_actions else '(无)'}"
+            )
+
+        try:
+            await self.client.run_action(did, eng_action, alias)
+            return f"✅ 已对设备 {alias} 执行动作: {eng_action}"
+        except MiHomeAuthError as e:
+            return f"❌ 鉴权失效: {e}\n请执行 /米家登录 重新授权。"
+        except MiHomeControlError as e:
+            err_str = str(e)
+            if err_str == "device_not_found":
+                return f"❌ 云端找不到设备 {alias}。"
+            elif err_str == "device_rejected":
+                return f"❌ 设备 {alias} 拒绝执行动作 {eng_action}（可能离线或不支持）。"
+            return f"❌ 动作执行失败: {err_str}"
+        except MiHomeClientError as e:
+            return f"❌ API/网络异常: {e}"
+        except Exception as e:
+            return f"❌ 内部错误: {e}"
+
     async def terminate(self):
         await self.client.terminate()
