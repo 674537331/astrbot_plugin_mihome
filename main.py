@@ -579,20 +579,25 @@ class MiHomeControlPlugin(Star):
         elif value_str in reverse_val_map:
             eng_value = value_str
         else:
-            # 未知值，检查该 prop 是否有 help_examples 可作 valid_values 提示
-            help_examples = get_device_help_examples(model=model, category=effective_category)
-            cn_prop_name = reverse_prop_map.get(eng_prop, eng_prop)
-            valid_values = help_examples.get(cn_prop_name, [])
-            if not valid_values:
-                # 没有枚举提示，可能是数值类，直接透传
-                parsed = self._parse_value(value_str)
+            # 未知值，尝试解析为数值（数值类属性如 target_temperature 的合法范围在 help_hints 中，
+            # help_examples 只是示例值，不是枚举）
+            parsed = self._parse_value(value_str)
+            if isinstance(parsed, (int, float)):
+                # 数值类，透传（cloud 端会做范围校验）
                 eng_value = parsed
             else:
-                return {
-                    "ok": False,
-                    "error": f"无效值: {value}，属性 {cn_prop_name} 支持以下值",
-                    "valid_values": valid_values,
-                }
+                # 非数值，检查是否为枚举类型属性
+                help_examples = get_device_help_examples(model=model, category=effective_category)
+                cn_prop_name = reverse_prop_map.get(eng_prop, eng_prop)
+                valid_values = help_examples.get(cn_prop_name, [])
+                if valid_values:
+                    return {
+                        "ok": False,
+                        "error": f"无效值: {value}，属性 {cn_prop_name} 支持以下值",
+                        "valid_values": valid_values,
+                    }
+                # 既不是数值也没有枚举提示，透传原值（让 cloud 端校验）
+                eng_value = parsed
 
         return {
             "ok": True,

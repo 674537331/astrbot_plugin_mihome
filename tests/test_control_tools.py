@@ -184,6 +184,20 @@ class TranslateControlOperationTests(unittest.TestCase):
         prop_names = result["valid_props"]
         self.assertIn("模式", prop_names)
 
+    def test_passes_through_numeric_value_when_help_examples_is_not_exhaustive(self):
+        """温度属性的 help_examples 是示例值（如 ["26", "24"]）而非枚举，
+        数值应该透传，cloud 端做范围校验。"""
+        plugin = self._make_plugin()
+        result = plugin._translate_control_operation(
+            model="lumi.acpartner.mcn02",
+            category="",
+            prop="温度",
+            value="26",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["prop"], "target_temperature")
+        self.assertEqual(result["value"], 26)  # Integer, parsed from string "26"
+
 
 class FormatControlResultTests(unittest.TestCase):
     """测试 _format_control_result：把执行结果列表格式化为 LLM 友好的多行字符串。"""
