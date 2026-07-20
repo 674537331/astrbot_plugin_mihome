@@ -528,6 +528,79 @@ class MiHomeControlPlugin(Star):
             return [str(v) for v in help_examples[cn_prop_name]]
         return []
 
+    def _translate_control_operation(
+        self,
+        model: str,
+        category: str,
+        prop: str,
+        value: Any,
+    ) -> Dict[str, Any]:
+        """把 LLM 提供的 prop/value 翻译为云端 prop/value。
+
+        翻译链：
+        - prop: 中文 -> prop_map 反查 -> 英文 key；英文直接透传
+        - value: 中文 -> value_map 反查 -> 英文/数值；数值/英文直接透传
+
+        失败时返回 ok=False 并附 valid_values 或 valid_props 供 LLM 自纠错。
+
+        注：val_map 取类别级（如 CATEGORY_AC 的 "制冷": "cool"），返回 LLM 友好的
+        英文枚举；具体型号的云端 API 数值（如 1）由调用方在 set_property 时再做映射。
+        """
+        configured_category = normalize_category(category)
+        effective_category = resolve_effective_category(model=model, category=configured_category)
+
+        prop_map = get_device_prop_map(model=model, category=effective_category)
+        # val_map 用类别级：返回 LLM 友好的英文枚举（"cool"），而非型号级云端 API 数值（1）
+        val_map = get_device_val_map(model="", category=effective_category)
+        writable_keys = get_device_detail_writable_keys(model=model, category=effective_category)
+        reverse_prop_map = {v: k for k, v in prop_map.items()}
+
+        # 1. 翻译 prop
+        prop_str = str(prop).strip()
+        if prop_str in prop_map:
+            eng_prop = prop_map[prop_str]
+        elif prop_str in reverse_prop_map.values() or prop_str in writable_keys:
+            eng_prop = prop_str
+        else:
+            valid_props = sorted(set(reverse_prop_map.values()) | set(writable_keys))
+            return {
+                "ok": False,
+                "error": f"未知属性: {prop}",
+                "valid_props": valid_props,
+            }
+
+        # 2. 翻译 value
+        value_str = str(value).strip() if not isinstance(value, (int, float, bool)) else value
+        # 直接传值（数值、bool、英文枚举）
+        reverse_val_map = {str(v): k for k, v in val_map.items()}
+        if isinstance(value, (int, float, bool)):
+            eng_value = value
+        elif value_str in val_map:
+            eng_value = val_map[value_str]
+        elif value_str in reverse_val_map:
+            eng_value = value_str
+        else:
+            # 未知值，检查该 prop 是否有 help_examples 可作 valid_values 提示
+            help_examples = get_device_help_examples(model=model, category=effective_category)
+            cn_prop_name = reverse_prop_map.get(eng_prop, eng_prop)
+            valid_values = help_examples.get(cn_prop_name, [])
+            if not valid_values:
+                # 没有枚举提示，可能是数值类，直接透传
+                parsed = self._parse_value(value_str)
+                eng_value = parsed
+            else:
+                return {
+                    "ok": False,
+                    "error": f"无效值: {value}，属性 {cn_prop_name} 支持以下值",
+                    "valid_values": valid_values,
+                }
+
+        return {
+            "ok": True,
+            "prop": eng_prop,
+            "value": eng_value,
+        }
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登录")
     async def mihome_login(self, event: AstrMessageEvent):

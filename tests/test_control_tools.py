@@ -121,5 +121,68 @@ class AggregateDeviceCapabilitiesTests(unittest.TestCase):
         self.assertIn("start_sweep", action_keys)
 
 
+class TranslateControlOperationTests(unittest.TestCase):
+    """测试 _translate_control_operation：把 LLM 提供的 prop+value 翻译为云端 key+value。"""
+
+    def _make_plugin(self):
+        from astrbot_plugin_mihome.main import MiHomeControlPlugin
+        plugin = MiHomeControlPlugin.__new__(MiHomeControlPlugin)
+        plugin.config = {}
+        plugin.data_manager = MagicMock()
+        plugin.client = MagicMock()
+        plugin.action_alias = {}
+        return plugin
+
+    def test_translates_chinese_prop_and_value(self):
+        plugin = self._make_plugin()
+        result = plugin._translate_control_operation(
+            model="lumi.acpartner.mcn02",
+            category="",
+            prop="模式",
+            value="制冷",
+        )
+        self.assertEqual(result["prop"], "mode")
+        self.assertEqual(result["value"], "cool")
+        self.assertTrue(result["ok"])
+
+    def test_passes_through_english_prop_and_value(self):
+        plugin = self._make_plugin()
+        result = plugin._translate_control_operation(
+            model="lumi.acpartner.mcn02",
+            category="",
+            prop="mode",
+            value="cool",
+        )
+        self.assertEqual(result["prop"], "mode")
+        self.assertEqual(result["value"], "cool")
+        self.assertTrue(result["ok"])
+
+    def test_returns_valid_values_hint_when_value_invalid(self):
+        plugin = self._make_plugin()
+        result = plugin._translate_control_operation(
+            model="lumi.acpartner.mcn02",
+            category="",
+            prop="模式",
+            value="送风模式",  # 不在枚举内
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("valid_values", result)
+        self.assertIn("制冷", result["valid_values"])
+
+    def test_returns_valid_props_hint_when_prop_unknown(self):
+        plugin = self._make_plugin()
+        result = plugin._translate_control_operation(
+            model="lumi.acpartner.mcn02",
+            category="",
+            prop="不存在属性",
+            value="任意值",
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("valid_props", result)
+        # 应该列出该设备的可写属性中文名
+        prop_names = result["valid_props"]
+        self.assertIn("模式", prop_names)
+
+
 if __name__ == "__main__":
     unittest.main()
