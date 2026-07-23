@@ -10,6 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
 from .data_manager import MiHomeDataManager
+from .web_api import MiHomeWebAPI
 from .mihome_client import (
     MiHomeClient,
     MiHomeAuthError,
@@ -100,13 +101,15 @@ READONLY_ALLOWED_CATEGORIES = {
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.3.0")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.0")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
-        self.config = config or {}
+        self.config = config if config is not None else {}
         self.data_manager = MiHomeDataManager(PLUGIN_NAME)
         self.client = MiHomeClient(self.data_manager)
+        self.web_api = MiHomeWebAPI(self)
+        self.web_api.register_routes(context)
 
         self.action_alias = {
             "开": True,
@@ -222,7 +225,7 @@ class MiHomeControlPlugin(Star):
         lines.extend(
             (
                 "🚀 快速开始",
-                "/米家登录 → /刷新米家 → 在 WebUI 配置 device_map → /米家详情 [设备别名]",
+                "插件详情 → 米家管理 → 扫码登录 → 同步设备 → 保存别名与类别",
                 "",
                 "🔒 除本帮助入口外，以上账号、设备与场景指令仅管理员可执行。",
             )
@@ -242,34 +245,21 @@ class MiHomeControlPlugin(Star):
         return bool(self.config.get("scene_tool_admin_only", False))
 
     def _event_is_admin(self, event: AstrMessageEvent) -> bool:
-        checker_names = (
-            "is_admin",
-            "is_admin_user",
-            "is_owner",
-            "is_superuser",
+        # 只信任 AstrBot 根据 admins_id 计算出的事件权限。平台侧的群主/
+        # 群管理员身份不能提升为 AstrBot 全局管理员，否则可能越权执行场景。
+        checker = getattr(event, "is_admin", None)
+        try:
+            if callable(checker):
+                return bool(checker())
+            if isinstance(checker, bool):
+                return checker
+        except Exception:
+            return False
+
+        return (
+            str(getattr(event, "role", "") or "").strip().lower()
+            == "admin"
         )
-        for name in checker_names:
-            checker = getattr(event, name, None)
-            try:
-                if callable(checker) and bool(checker()):
-                    return True
-                if isinstance(checker, bool) and checker:
-                    return True
-            except Exception:
-                pass
-
-        message_obj = getattr(event, "message_obj", None)
-        sender = getattr(message_obj, "sender", None) if message_obj is not None else None
-        role = str(getattr(sender, "role", "") or "").strip().lower()
-        if role in {"owner", "admin", "administrator"}:
-            return True
-
-        for attr in ("is_admin", "admin", "is_owner"):
-            value = getattr(sender, attr, None) if sender is not None else None
-            if isinstance(value, bool) and value:
-                return True
-
-        return False
 
     def _check_scene_tool_access(self, event: AstrMessageEvent) -> Optional[str]:
         if not self._scene_tool_enabled():
@@ -1270,4 +1260,5 @@ class MiHomeControlPlugin(Star):
             return f"内部错误：{e}"
 
     async def terminate(self):
+        await self.web_api.terminate()
         await self.client.terminate()

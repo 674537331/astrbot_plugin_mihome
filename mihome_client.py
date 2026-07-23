@@ -190,6 +190,28 @@ class MiHomeClient:
 
         return url
 
+    def _redact_login_output(self, text: str) -> str:
+        """隐藏登录输出中的二维码链接和认证参数。"""
+
+        raw = str(text or "")
+        # 登录 URL 可能被子进程拆成多行。只要能从整体缓冲区恢复出它，
+        # 就隐藏整段原始输出，避免任何续行查询参数绕过逐行正则。
+        if self._extract_qr_url_from_buffer(raw):
+            sanitized = "[米家登录输出已隐藏]"
+        else:
+            sanitized = re.sub(
+                r"https://account\.xiaomi\.com/pass/qr/login\?[^\s]+",
+                "[米家登录链接已隐藏]",
+                raw,
+                flags=re.IGNORECASE,
+            )
+        return re.sub(
+            r"(?i)(ticket|serviceToken|passToken|ssecurity|deviceId|userId|token)"
+            r"([\"']?\s*[:=]\s*[\"']?)([^,\s\"'&}]+)",
+            r"\1\2[已隐藏]",
+            sanitized,
+        )
+
     async def get_login_status(self) -> Dict[str, Any]:
         state = self.data_manager.load_state()
         return {
@@ -271,9 +293,11 @@ class MiHomeClient:
                     full_buffer = (full_buffer + text)[-16384:]
 
                     if text.strip():
-                        for line in text.split("\n"):
-                            if line.strip():
-                                logger.debug(f"[Sandbox] {line.strip()}")
+                        # 登录输出可能在任意字节边界拆分二维码票据。即使逐行
+                        # 脱敏也有跨 chunk 泄露风险，因此日志只记录固定进度。
+                        logger.debug(
+                            "[Sandbox] 登录子进程有新输出，内容已隐藏。"
+                        )
 
                     if not qr_found:
                         url = self._extract_qr_url_from_buffer(full_buffer)
@@ -312,13 +336,16 @@ class MiHomeClient:
                     self.api = mijiaAPI(self.data_manager.get_auth_path())
                     return {"status": "success" if qr_found else "already_logged_in"}
                 else:
-                    err = full_buffer[-800:].strip()
+                    err = self._redact_login_output(
+                        full_buffer[-800:].strip()
+                    )
                     logger.error(f"[MiHome] 沙盒异常退出: {err}")
                     self.data_manager.update_state(last_login_error=err)
                     return {"status": "error", "message": err}
         except Exception as e:
-            self.data_manager.update_state(last_login_error=str(e))
-            return {"status": "error", "message": str(e)}
+            safe_error = self._redact_login_output(str(e))
+            self.data_manager.update_state(last_login_error=safe_error)
+            return {"status": "error", "message": safe_error}
         finally:
             self._login_status = LOGIN_IDLE
             async with self._api_lock:

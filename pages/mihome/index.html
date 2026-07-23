@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ff6900">
+  <title>米家云端管理</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span>MI</span></div>
+        <div>
+          <strong>米家云端</strong>
+          <span>配置与诊断中心</span>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item is-active" type="button" data-view="overview">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg>
+          <span>概览</span>
+        </button>
+        <button class="nav-item" type="button" data-view="devices">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 2h10a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H7Zm5 11.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z"/></svg>
+          <span>设备管理</span>
+          <span class="nav-count" id="nav-device-count" hidden>0</span>
+        </button>
+        <button class="nav-item" type="button" data-view="scenes">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3L18.7 8 12 11.7 5.3 8 12 4.3ZM5 9.7l6 3.3v6.4l-6-3.3V9.7Zm8 9.7V13l6-3.3v6.4l-6 3.3Z"/></svg>
+          <span>场景与 Tool</span>
+        </button>
+        <button class="nav-item" type="button" data-view="diagnostics">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 2h2v3.08A7 7 0 0 1 18.92 11H22v2h-3.08A7 7 0 0 1 13 18.92V22h-2v-3.08A7 7 0 0 1 5.08 13H2v-2h3.08A7 7 0 0 1 11 5.08V2Zm1 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10Zm0 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z"/></svg>
+          <span>诊断</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span class="connection-dot" id="connection-dot" aria-hidden="true"></span>
+        <span id="connection-label">正在连接 AstrBot…</span>
+      </div>
+    </aside>
+
+    <main class="main" id="main-content" tabindex="-1">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">ASTRBOT 插件页面</p>
+          <h1 id="page-title">概览</h1>
+          <p id="page-subtitle">查看账号、同步与运行健康状态</p>
+        </div>
+        <div class="topbar-actions">
+          <span class="status-pill is-neutral" id="top-status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>读取中</span>
+          </span>
+          <button class="icon-button" id="refresh-current" type="button" aria-label="刷新当前页面" title="刷新当前页面">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18.4 5.6A9 9 0 1 0 20.8 14h-2.1A7 7 0 1 1 17 7l-3 3h8V2l-3.6 3.6Z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <section class="view is-active" id="view-overview" data-view-panel="overview" aria-labelledby="page-title">
+        <div class="hero-card">
+          <div class="hero-copy">
+            <span class="hero-kicker">米家 × AstrBot</span>
+            <h2>把配置变简单，<br><em>把控制留在聊天里。</em></h2>
+            <p>这里仅负责账号授权、设备映射、场景同步和问题诊断，不会直接控制任何设备或执行场景。</p>
+            <div class="hero-actions">
+              <button class="button button-primary" id="hero-login" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-1 15-4-4 1.4-1.4 2.6 2.6 5.6-5.6L18 10l-7 7Z"/></svg>
+                扫码登录
+              </button>
+              <button class="button button-secondary" type="button" data-go-view="devices">管理设备映射</button>
+            </div>
+          </div>
+          <div class="hero-visual" aria-hidden="true">
+            <div class="home-orbit orbit-one"></div>
+            <div class="home-orbit orbit-two"></div>
+            <div class="home-core">
+              <svg viewBox="0 0 24 24"><path d="m3 11 9-8 9 8v10h-6v-6H9v6H3V11Zm2 1v7h2v-6h10v6h2v-7l-7-6.2L5 12Z"/></svg>
+            </div>
+            <span class="orbit-device device-one"></span>
+            <span class="orbit-device device-two"></span>
+            <span class="orbit-device device-three"></span>
+          </div>
+        </div>
+
+        <div class="metric-grid" aria-label="运行概览">
+          <article class="metric-card">
+            <span class="metric-icon is-orange"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.74V22l4-2 4 2v-7.26A7 7 0 0 0 12 2Zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z"/></svg></span>
+            <div><span>账号状态</span><strong id="metric-account">读取中</strong><small id="metric-login-time">尚未获取</small></div>
+          </article>
+          <article class="metric-card">
+            <span class="metric-icon is-blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 2h10a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H7Z"/></svg></span>
+            <div><span>云端设备</span><strong id="metric-devices">—</strong><small id="metric-mapped">等待设备同步</small></div>
+          </article>
+          <article class="metric-card">
+            <span class="metric-icon is-green"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3L18.7 8 12 11.7 5.3 8 12 4.3Z"/></svg></span>
+            <div><span>场景缓存</span><strong id="metric-scenes">—</strong><small id="metric-scene-time">尚未同步</small></div>
+          </article>
+          <article class="metric-card">
+            <span class="metric-icon is-purple"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 2h2v3.08A7 7 0 0 1 18.92 11H22v2h-3.08A7 7 0 0 1 13 18.92V22h-2v-3.08A7 7 0 0 1 5.08 13H2v-2h3.08A7 7 0 0 1 11 5.08V2Z"/></svg></span>
+            <div><span>运行健康</span><strong id="metric-health">检查中</strong><small id="metric-health-note">正在读取诊断信息</small></div>
+          </article>
+        </div>
+
+        <div class="overview-grid">
+          <article class="card account-card">
+            <div class="card-heading">
+              <div>
+                <span class="section-kicker">账号</span>
+                <h3>米家账号</h3>
+              </div>
+              <span class="status-badge is-neutral" id="account-badge">读取中</span>
+            </div>
+            <div class="account-body">
+              <div class="account-avatar" aria-hidden="true">米</div>
+              <div>
+                <strong id="account-title">正在检查授权状态</strong>
+                <p id="account-description">请稍候，正在与插件后端建立连接。</p>
+              </div>
+            </div>
+            <div class="auth-panel" id="auth-panel" hidden>
+              <div class="qr-frame">
+                <img id="auth-qr-image" alt="米家登录二维码" hidden>
+                <div class="qr-placeholder" id="auth-qr-placeholder">
+                  <span class="spinner" aria-hidden="true"></span>
+                  <span>等待二维码</span>
+                </div>
+              </div>
+              <div>
+                <strong>请使用米家 App 扫码</strong>
+                <p id="auth-progress">二维码生成后，请在米家 App 中确认授权。</p>
+              </div>
+            </div>
+            <div class="button-row">
+              <button class="button button-primary" id="account-login" type="button">开始扫码登录</button>
+              <button class="button button-ghost is-danger" id="account-logout" type="button" hidden>退出并清除凭证</button>
+            </div>
+          </article>
+
+          <article class="card setup-card">
+            <div class="card-heading">
+              <div>
+                <span class="section-kicker">快速开始</span>
+                <h3>三步完成配置</h3>
+              </div>
+            </div>
+            <ol class="step-list">
+              <li>
+                <span>1</span>
+                <div><strong>授权米家账号</strong><p>扫码后由插件安全保存登录凭证。</p></div>
+              </li>
+              <li>
+                <span>2</span>
+                <div><strong>同步并配置设备</strong><p>为需要使用的设备填写清晰别名与类别。</p></div>
+              </li>
+              <li>
+                <span>3</span>
+                <div><strong>按需开启 Tool</strong><p>建议仅对管理员开放可执行场景的 Tool。</p></div>
+              </li>
+            </ol>
+          </article>
+
+          <article class="card activity-card">
+            <div class="card-heading">
+              <div>
+                <span class="section-kicker">最近状态</span>
+                <h3>最近状态</h3>
+              </div>
+              <button class="text-button" type="button" data-go-view="diagnostics">查看诊断</button>
+            </div>
+            <dl class="status-list" id="recent-status-list">
+              <div><dt>最近登录</dt><dd>读取中</dd></div>
+              <div><dt>共享设备</dt><dd>读取中</dd></div>
+              <div><dt>场景同步</dt><dd>读取中</dd></div>
+            </dl>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-devices" data-view-panel="devices" aria-labelledby="page-title" hidden>
+        <div class="section-header">
+          <div>
+            <span class="section-kicker">设备映射</span>
+            <h2>设备映射</h2>
+            <p>为云端设备设置聊天中使用的别名和明确类别。这里不提供任何设备控制。</p>
+          </div>
+          <button class="button button-primary" id="sync-devices" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18.4 5.6A9 9 0 1 0 20.8 14h-2.1A7 7 0 1 1 17 7l-3 3h8V2l-3.6 3.6Z"/></svg>
+            同步云端设备
+          </button>
+        </div>
+
+        <div class="info-banner">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 10h2v7h-2v-7Zm0-3h2v2h-2V7Zm1-5a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16Z"/></svg>
+          <div><strong>别名就是聊天中的设备名称</strong><span>建议使用“房间 + 设备”，例如“客厅 空调”。未设置别名的设备不会进入插件映射。</span></div>
+        </div>
+
+        <div class="device-toolbar card">
+          <label class="search-box">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m20.7 19.3-4.1-4.1a7.5 7.5 0 1 0-1.4 1.4l4.1 4.1 1.4-1.4ZM5 11a6 6 0 1 1 12 0 6 6 0 0 1-12 0Z"/></svg>
+            <span class="sr-only">搜索设备</span>
+            <input id="device-search" type="search" placeholder="搜索名称、别名、DID 或型号" autocomplete="off">
+          </label>
+          <label class="filter-label">
+            <span class="sr-only">映射状态</span>
+            <select id="device-filter">
+              <option value="all">全部设备</option>
+              <option value="mapped">已映射</option>
+              <option value="unmapped">未映射</option>
+              <option value="shared">共享设备</option>
+            </select>
+          </label>
+          <div class="device-summary" id="device-summary">尚未读取设备</div>
+        </div>
+
+        <div class="device-list" id="device-list" aria-live="polite"></div>
+        <div class="empty-state" id="device-empty" hidden>
+          <div class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 2h10a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H7Z"/></svg></div>
+          <h3>还没有可显示的设备</h3>
+          <p>请先登录米家账号，再同步云端设备列表。</p>
+        </div>
+
+        <div class="save-dock" id="mapping-save-dock" hidden>
+          <div><span class="save-dot" aria-hidden="true"></span><strong id="mapping-change-count">0 项待保存</strong><span>保存前会展示变更摘要</span></div>
+          <div class="button-row">
+            <button class="button button-ghost" id="reset-mappings" type="button">撤销修改</button>
+            <button class="button button-primary" id="review-mappings" type="button">检查并保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-scenes" data-view-panel="scenes" aria-labelledby="page-title" hidden>
+        <div class="section-header">
+          <div>
+            <span class="section-kicker">场景与 TOOL</span>
+            <h2>场景与 Tool 权限</h2>
+            <p>同步场景目录并管理大模型 Tool 的开放范围。此页面不会执行场景。</p>
+          </div>
+          <button class="button button-secondary" id="sync-scenes" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18.4 5.6A9 9 0 1 0 20.8 14h-2.1A7 7 0 1 1 17 7l-3 3h8V2l-3.6 3.6Z"/></svg>
+            同步场景目录
+          </button>
+        </div>
+
+        <div class="safety-banner">
+          <div class="safety-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 2 9 4v6c0 5.5-3.8 9.7-9 10-5.2-.3-9-4.5-9-10V6l9-4Zm0 2.2L5 7.3V12c0 4.2 2.7 7.5 7 8 4.3-.5 7-3.8 7-8V7.3l-7-3.1Zm-1 4.3h2v5h-2v-5Zm0 6.5h2v2h-2v-2Z"/></svg></div>
+          <div><strong>场景可能触发真实家居动作</strong><p>建议开启“仅管理员可调用”。任何 Tool 权限修改都会在保存前再次确认。</p></div>
+        </div>
+
+        <div class="scene-layout">
+          <article class="card tool-card">
+            <div class="card-heading">
+              <div><span class="section-kicker">权限设置</span><h3>LLM Tool 权限</h3></div>
+              <span class="status-badge is-neutral" id="tool-save-state">已同步</span>
+            </div>
+            <div class="setting-list">
+              <label class="setting-row">
+                <span class="setting-icon is-blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v16H4V4Zm2 2v12h12V6H6Zm2 3h8v2H8V9Zm0 4h5v2H8v-2Z"/></svg></span>
+                <span class="setting-copy"><strong>设备只读 Tool</strong><small>仅允许读取已映射设备的实时状态，不包含控制能力。</small></span>
+                <span class="switch"><input id="tool-readonly" type="checkbox"><span aria-hidden="true"></span></span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-icon is-orange"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3L18.7 8 12 11.7 5.3 8 12 4.3Z"/></svg></span>
+                <span class="setting-copy"><strong>场景 LLM Tool</strong><small>允许读取缓存场景，并可能由大模型请求执行场景。</small></span>
+                <span class="switch"><input id="tool-scenes" type="checkbox"><span aria-hidden="true"></span></span>
+              </label>
+              <label class="setting-row is-nested" id="admin-only-row">
+                <span class="setting-icon is-green"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 1 5 5v2h2v13H5V9h2V7a5 5 0 0 1 5-5Zm3 7V7a3 3 0 0 0-6 0v2h6Zm-8 2v9h10v-9H7Z"/></svg></span>
+                <span class="setting-copy"><strong>仅管理员可调用场景 Tool</strong><small>强烈建议保持开启，避免普通成员触发真实家居动作。</small></span>
+                <span class="switch"><input id="tool-admin-only" type="checkbox"><span aria-hidden="true"></span></span>
+              </label>
+            </div>
+            <div class="risk-note" id="tool-risk-note" hidden>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2 1 21h22L12 2Zm0 4 7.5 13h-15L12 6Zm-1 4v5h2v-5h-2Zm0 6v2h2v-2h-2Z"/></svg>
+              <span>场景 Tool 对所有用户开放会增加误触发风险，请谨慎确认。</span>
+            </div>
+            <button class="button button-primary button-block" id="save-tools" type="button" disabled>保存 Tool 权限</button>
+          </article>
+
+          <article class="card scene-card">
+            <div class="card-heading">
+              <div><span class="section-kicker">场景缓存</span><h3>已缓存场景</h3></div>
+              <span class="subtle-text" id="scene-cache-time">尚未同步</span>
+            </div>
+            <div class="scene-list" id="scene-list"></div>
+            <div class="mini-empty" id="scene-empty">
+              <p>暂无场景缓存</p>
+              <span>点击“同步场景目录”读取米家云端场景。</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-diagnostics" data-view-panel="diagnostics" aria-labelledby="page-title" hidden>
+        <div class="section-header">
+          <div>
+            <span class="section-kicker">诊断</span>
+            <h2>运行诊断</h2>
+            <p>检查账号、网络、缓存与配置健康状态。诊断信息会自动隐藏敏感凭证。</p>
+          </div>
+          <button class="button button-primary" id="run-diagnostics" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 2h2v3.08A7 7 0 0 1 18.92 11H22v2h-3.08A7 7 0 0 1 13 18.92V22h-2v-3.08A7 7 0 0 1 5.08 13H2v-2h3.08A7 7 0 0 1 11 5.08V2Z"/></svg>
+            运行健康检查
+          </button>
+        </div>
+
+        <article class="diagnostic-hero card">
+          <div class="health-ring" id="health-ring">
+            <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="19"></circle><circle class="health-progress" cx="24" cy="24" r="19"></circle></svg>
+            <strong id="health-score">—</strong>
+          </div>
+          <div>
+            <span class="section-kicker">系统健康</span>
+            <h3 id="health-title">等待检查</h3>
+            <p id="health-description">运行一次健康检查，确认关键组件是否可用。</p>
+          </div>
+          <span class="diagnostic-time" id="diagnostic-time">尚未运行</span>
+        </article>
+
+        <div class="diagnostic-grid" id="diagnostic-grid"></div>
+
+        <div class="diagnostic-bottom">
+          <article class="card">
+            <div class="card-heading"><div><span class="section-kicker">异常记录</span><h3>最近异常</h3></div></div>
+            <div class="issue-list" id="issue-list">
+              <div class="issue-empty">暂无异常记录</div>
+            </div>
+          </article>
+          <article class="card privacy-card">
+            <div class="privacy-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 1 5 5v2h2v13H5V9h2V7a5 5 0 0 1 5-5Zm3 7V7a3 3 0 0 0-6 0v2h6Zm-8 2v9h10v-9H7Z"/></svg></div>
+            <div>
+              <span class="section-kicker">隐私保护</span>
+              <h3>凭证不会在页面中展示</h3>
+              <p>诊断接口只返回脱敏后的运行信息。Cookie、Token 与登录文件不可查看或下载。</p>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="drawer-layer" id="device-detail-layer" hidden>
+    <button class="drawer-backdrop" type="button" data-close-device-detail aria-label="关闭设备状态"></button>
+    <aside class="device-drawer" role="dialog" aria-modal="true" aria-labelledby="device-detail-title">
+      <div class="drawer-header">
+        <div>
+          <span class="section-kicker">只读状态</span>
+          <h2 id="device-detail-title">设备状态</h2>
+          <p id="device-detail-subtitle">仅读取，不会执行任何控制</p>
+        </div>
+        <button class="icon-button" type="button" data-close-device-detail aria-label="关闭">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>
+        </button>
+      </div>
+      <div class="drawer-content">
+        <div class="drawer-loading" id="device-detail-loading">
+          <span class="spinner" aria-hidden="true"></span>
+          <p>正在读取设备实时状态…</p>
+        </div>
+        <div id="device-detail-content" hidden>
+          <dl class="device-detail-meta" id="device-detail-meta"></dl>
+          <div class="state-grid" id="device-state-grid"></div>
+          <div class="readonly-note">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 1 5 5v2h2v13H5V9h2V7a5 5 0 0 1 5-5Zm3 7V7a3 3 0 0 0-6 0v2h6Z"/></svg>
+            此处仅展示只读状态，不包含开关、属性设置或动作入口。
+          </div>
+        </div>
+        <div class="drawer-error" id="device-detail-error" hidden>
+          <span aria-hidden="true">!</span>
+          <strong>状态读取失败</strong>
+          <p id="device-detail-error-message">请稍后重试。</p>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="dialog-layer" id="app-dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" hidden>
+    <button class="dialog-backdrop" id="dialog-backdrop" type="button" aria-label="取消"></button>
+    <div class="dialog-card">
+      <div class="dialog-icon" id="dialog-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M11 10h2v7h-2v-7Zm0-3h2v2h-2V7Zm1-5a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z"/></svg>
+      </div>
+      <h2 id="dialog-title">确认操作</h2>
+      <p id="dialog-message"></p>
+      <ul class="dialog-summary" id="dialog-summary" hidden></ul>
+      <div class="dialog-actions">
+        <button class="button button-ghost" id="dialog-cancel" type="button">取消</button>
+        <button class="button button-primary" id="dialog-confirm" type="button">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
