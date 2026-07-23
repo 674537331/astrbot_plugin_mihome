@@ -35,6 +35,7 @@ from .device_profiles import (
     CATEGORY_NONE,
     CATEGORY_PURIFIER,
     CATEGORY_ROUTER,
+    CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
     CATEGORY_TH_SENSOR,
     CATEGORY_VACUUM,
@@ -64,6 +65,7 @@ CATEGORY_OPTIONS = (
     CATEGORY_VACUUM,
     CATEGORY_WATER_HEATER,
     CATEGORY_ROUTER,
+    CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
@@ -547,22 +549,51 @@ class MiHomeWebAPI:
         scene_admin_only = bool(
             scene_config.get(
                 "admin_only",
-                self._config.get("scene_tool_admin_only", False),
+                self._config.get("scene_tool_admin_only", True),
             )
         )
+        control_config = self._config.get("control_tool", {})
+        if not isinstance(control_config, dict):
+            control_config = {}
+        allowed_devices = control_config.get("allowed_devices", [])
+        if isinstance(allowed_devices, str):
+            try:
+                allowed_devices = json.loads(allowed_devices)
+            except json.JSONDecodeError:
+                allowed_devices = []
+        if not isinstance(allowed_devices, list):
+            allowed_devices = []
+        allowed_aliases = []
+        for value in allowed_devices:
+            alias = str(value or "").strip()
+            if alias and alias not in allowed_aliases:
+                allowed_aliases.append(alias)
+
+        scene_risky = scene_enable and not scene_admin_only
+        control_enable = bool(control_config.get("enable", False))
+        control_admin_only = bool(control_config.get("admin_only", True))
+        control_risky = control_enable and not control_admin_only
+        warnings = []
+        if scene_risky:
+            warnings.append("场景 Tool 当前允许非管理员调用，可能触发真实自动化。")
+        if control_risky:
+            warnings.append("设备控制 Tool 当前允许非管理员调用，可能触发真实物理操作。")
+        if control_enable and not allowed_aliases:
+            warnings.append("设备控制 Tool 已开启但白名单为空，当前不会控制任何设备。")
         return {
             "scene_tool": {
                 "enable": scene_enable,
                 "admin_only": scene_admin_only,
             },
+            "control_tool": {
+                "enable": control_enable,
+                "admin_only": control_admin_only,
+                "allowed_devices": allowed_aliases,
+            },
             "enable_readonly_tool": bool(
                 self._config.get("enable_readonly_tool", False)
             ),
-            "warnings": (
-                ["场景 Tool 当前允许非管理员调用，可能触发真实自动化。"]
-                if scene_enable and not scene_admin_only
-                else []
-            ),
+            "warnings": warnings,
         }
 
     # ------------------------------------------------------------------
@@ -612,6 +643,9 @@ class MiHomeWebAPI:
                     "device_control_available": False,
                     "scene_execution_available": False,
                     "credentials_exposed": False,
+                    "llm_device_control_enabled": tool_settings["control_tool"][
+                        "enable"
+                    ],
                 },
             }
         )
@@ -1141,7 +1175,18 @@ class MiHomeWebAPI:
 
     async def save_tool_settings(self):
         data = await self._read_json_body()
+        supported_fields = {
+            "enable_readonly_tool",
+            "scene_tool",
+            "control_tool",
+            "confirm_public_scene_tool",
+            "confirm_control_tool",
+            "confirm_public_control_tool",
+        }
+        if set(data) - supported_fields:
+            raise WebAPIError("Tool 设置包含不支持的字段。")
         scene = data.get("scene_tool")
+        control = data.get("control_tool")
         if not isinstance(scene, dict):
             raise WebAPIError("scene_tool 必须是对象。")
         if set(scene) - {"enable", "admin_only"}:
@@ -1152,6 +1197,40 @@ class MiHomeWebAPI:
             raise WebAPIError("scene_tool.admin_only 必须是布尔值。")
         if not isinstance(data.get("enable_readonly_tool"), bool):
             raise WebAPIError("enable_readonly_tool 必须是布尔值。")
+        if not isinstance(control, dict):
+            raise WebAPIError("control_tool 必须是对象。")
+        if set(control) - {"enable", "admin_only", "allowed_devices"}:
+            raise WebAPIError("control_tool 包含不支持的配置项。")
+        if not isinstance(control.get("enable"), bool):
+            raise WebAPIError("control_tool.enable 必须是布尔值。")
+        if not isinstance(control.get("admin_only"), bool):
+            raise WebAPIError("control_tool.admin_only 必须是布尔值。")
+        allowed_devices = control.get("allowed_devices")
+        if not isinstance(allowed_devices, list):
+            raise WebAPIError("control_tool.allowed_devices 必须是数组。")
+        if len(allowed_devices) > MAX_MAPPING_COUNT:
+            raise WebAPIError(
+                f"control_tool.allowed_devices 最多允许 {MAX_MAPPING_COUNT} 项。"
+            )
+
+        device_map, _category_map, mapping_errors = self._mapping_snapshot()
+        if mapping_errors:
+            raise WebAPIError("设备映射格式无效，请先修复设备映射。")
+        normalized_allowed = []
+        for index, value in enumerate(allowed_devices, 1):
+            if not isinstance(value, str):
+                raise WebAPIError(f"设备白名单第 {index} 项必须是字符串。")
+            alias = value.strip()
+            if (
+                not alias
+                or len(alias) > MAX_ALIAS_LENGTH
+                or _CONTROL_CHAR_PATTERN.search(alias)
+            ):
+                raise WebAPIError(f"设备白名单第 {index} 项不是有效别名。")
+            if alias not in device_map:
+                raise WebAPIError(f"设备白名单别名“{alias}”不在 device_map 中。")
+            if alias not in normalized_allowed:
+                normalized_allowed.append(alias)
 
         if (
             scene["enable"]
@@ -1162,17 +1241,42 @@ class MiHomeWebAPI:
                 "允许非管理员调用场景 Tool 可能触发真实自动化；"
                 "确认风险后请提交 confirm_public_scene_tool=true。"
             )
+        if control["enable"] and data.get("confirm_control_tool") is not True:
+            raise WebAPIError(
+                "设备控制 Tool 可以触发真实物理操作；"
+                "确认风险后请提交 confirm_control_tool=true。"
+            )
+        if (
+            control["enable"]
+            and not control["admin_only"]
+            and data.get("confirm_public_control_tool") is not True
+        ):
+            raise WebAPIError(
+                "允许非管理员调用设备控制 Tool 风险很高；"
+                "再次确认后请提交 confirm_public_control_tool=true。"
+            )
 
-        old_scene = deepcopy(self._config.get("scene_tool", {}))
         old_readonly = self._config.get("enable_readonly_tool", False)
-        old_legacy_enable = self._config.get("enable_scene_tool", False)
-        old_legacy_admin = self._config.get(
+        managed_keys = (
+            "scene_tool",
+            "control_tool",
+            "enable_readonly_tool",
+            "enable_scene_tool",
             "scene_tool_admin_only",
-            False,
         )
+        original_values = {
+            key: deepcopy(self._config[key])
+            for key in managed_keys
+            if key in self._config
+        }
         new_scene = {
             "enable": scene["enable"],
             "admin_only": scene["admin_only"],
+        }
+        new_control = {
+            "enable": control["enable"],
+            "admin_only": control["admin_only"],
+            "allowed_devices": normalized_allowed,
         }
         changes = {
             "scene_tool": {
@@ -1183,11 +1287,16 @@ class MiHomeWebAPI:
                 "before": bool(old_readonly),
                 "after": data["enable_readonly_tool"],
             },
+            "control_tool": {
+                "before": self._tool_settings()["control_tool"],
+                "after": new_control,
+            },
         }
 
         self._ensure_operation_available()
         async with self._operation_lock:
             self._config["scene_tool"] = new_scene
+            self._config["control_tool"] = new_control
             self._config["enable_readonly_tool"] = data["enable_readonly_tool"]
             # 与旧版隐藏字段保持一致，避免降级后出现权限反转。
             self._config["enable_scene_tool"] = new_scene["enable"]
@@ -1195,10 +1304,11 @@ class MiHomeWebAPI:
             try:
                 await self._persist_config()
             except Exception:
-                self._config["scene_tool"] = old_scene
-                self._config["enable_readonly_tool"] = old_readonly
-                self._config["enable_scene_tool"] = old_legacy_enable
-                self._config["scene_tool_admin_only"] = old_legacy_admin
+                for key in managed_keys:
+                    if key in original_values:
+                        self._config[key] = original_values[key]
+                    else:
+                        self._config.pop(key, None)
                 raise
 
         return json_response(
@@ -1336,6 +1446,37 @@ class MiHomeWebAPI:
                 "success",
                 "场景 Tool 权限",
                 "场景 Tool 已关闭或仅管理员可调用。",
+            )
+
+        control_tool = tool_settings["control_tool"]
+        if control_tool["enable"] and not control_tool["admin_only"]:
+            add(
+                "control_tool_permission",
+                "warning",
+                "设备控制 Tool 权限",
+                "设备控制 Tool 允许非管理员调用，存在真实物理操作风险。",
+            )
+        elif control_tool["enable"] and not control_tool["allowed_devices"]:
+            add(
+                "control_tool_allowlist",
+                "warning",
+                "设备控制 Tool 白名单",
+                "设备控制 Tool 已开启但白名单为空，当前会失败关闭。",
+            )
+        elif control_tool["enable"]:
+            add(
+                "control_tool_permission",
+                "success",
+                "设备控制 Tool 权限",
+                f"设备控制 Tool 仅管理员可用，白名单含 "
+                f"{len(control_tool['allowed_devices'])} 台设备。",
+            )
+        else:
+            add(
+                "control_tool_permission",
+                "success",
+                "设备控制 Tool 权限",
+                "设备控制 Tool 已关闭。",
             )
 
         error_fields = (

@@ -33,8 +33,36 @@
       "admin_only": {
         "description": "场景 LLM Tool 是否仅管理员可调用",
         "type": "bool",
+        "default": true,
+        "hint": "开启后，list_cached_mihome_scenes 与 execute_mihome_scene 两个场景工具仅 AstrBot 管理员可用。建议保持开启。"
+      }
+    }
+  },
+  "control_tool": {
+    "description": "米家设备控制 LLM Tool 配置",
+    "type": "object",
+    "hint": "物理设备控制默认关闭；启用后仍只允许控制白名单中的别名和静态画像明确支持的属性、动作。",
+    "items": {
+      "enable": {
+        "description": "是否启用米家设备控制 LLM Tool",
+        "type": "bool",
         "default": false,
-        "hint": "开启后，list_cached_mihome_scenes 与 execute_mihome_scene 两个场景工具仅管理员可用。默认关闭以保持兼容。"
+        "hint": "开启后，大模型可以发现、检查和控制已加入白名单的设备。保存前请确认真实家居操作风险。"
+      },
+      "admin_only": {
+        "description": "设备控制 LLM Tool 是否仅管理员可调用",
+        "type": "bool",
+        "default": true,
+        "hint": "只信任 AstrBot 官方 event.is_admin() 判定；不会把群管理员自动视为 AstrBot 管理员。强烈建议保持开启。"
+      },
+      "allowed_devices": {
+        "description": "允许控制的设备别名白名单",
+        "type": "list",
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "hint": "填写 device_map 中的精确别名。空列表会失败关闭：即使总开关已打开，也不会控制任何设备。推荐在插件详情页的“米家管理”中勾选。"
       }
     }
   },
@@ -47,7 +75,7 @@
   "scene_tool_admin_only": {
     "description": "兼容旧版本：场景 Tool 管理员开关（请使用 scene_tool.admin_only）",
     "type": "bool",
-    "default": false,
+    "default": true,
     "invisible": true
   },
   "enable_readonly_tool": {

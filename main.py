@@ -10,6 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
 from .data_manager import MiHomeDataManager
+from .control_tools import MiHomeControlTools
 from .web_api import MiHomeWebAPI
 from .mihome_client import (
     MiHomeClient,
@@ -29,6 +30,7 @@ from .device_profiles import (
     CATEGORY_VACUUM,
     CATEGORY_WATER_HEATER,
     CATEGORY_ROUTER,
+    CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
@@ -56,7 +58,7 @@ MIHOME_HELP_SECTIONS = (
     (
         "🔑 账号与同步",
         (
-            ("/米家登录", "扫码授权米家账号"),
+            ("/米家登录", "打开内置管理页安全授权米家账号"),
             ("/米家状态", "查看登录、共享设备和最近控制状态"),
             ("/刷新米家", "同步设备列表并刷新 DID、model 缓存"),
             ("/米家登出", "清除登录凭证和本地状态"),
@@ -95,19 +97,21 @@ READONLY_ALLOWED_CATEGORIES = {
     CATEGORY_VACUUM,
     CATEGORY_WATER_HEATER,
     CATEGORY_ROUTER,
+    CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "7.4.0")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.0.0")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config if config is not None else {}
         self.data_manager = MiHomeDataManager(PLUGIN_NAME)
         self.client = MiHomeClient(self.data_manager)
+        self.control_tools = MiHomeControlTools(self)
         self.web_api = MiHomeWebAPI(self)
         self.web_api.register_routes(context)
 
@@ -241,8 +245,8 @@ class MiHomeControlPlugin(Star):
     def _scene_tool_admin_only(self) -> bool:
         scene_tool_cfg = self.config.get("scene_tool", {})
         if isinstance(scene_tool_cfg, dict) and "admin_only" in scene_tool_cfg:
-            return bool(scene_tool_cfg.get("admin_only", False))
-        return bool(self.config.get("scene_tool_admin_only", False))
+            return bool(scene_tool_cfg.get("admin_only", True))
+        return bool(self.config.get("scene_tool_admin_only", True))
 
     def _event_is_admin(self, event: AstrMessageEvent) -> bool:
         # 只信任 AstrBot 根据 admins_id 计算出的事件权限。平台侧的群主/
@@ -256,10 +260,7 @@ class MiHomeControlPlugin(Star):
         except Exception:
             return False
 
-        return (
-            str(getattr(event, "role", "") or "").strip().lower()
-            == "admin"
-        )
+        return False
 
     def _check_scene_tool_access(self, event: AstrMessageEvent) -> Optional[str]:
         if not self._scene_tool_enabled():
@@ -290,14 +291,20 @@ class MiHomeControlPlugin(Star):
         state = self.data_manager.load_state()
         return str(state.get("scene_cache_updated_at", "")).strip()
 
-    def _format_scene_line(self, idx: int, scene: Dict[str, Any]) -> str:
+    def _format_scene_line(
+        self,
+        idx: int,
+        scene: Dict[str, Any],
+        *,
+        include_home: bool = False,
+    ) -> str:
         scene_name = scene.get("scene_name") or "未命名场景"
         scene_id = scene.get("scene_id") or "unknown"
-        home_name = scene.get("home_name") or "未知家庭"
-        home_id = scene.get("home_id") or ""
-        if home_id:
-            return f"{idx}. {scene_name}  [scene_id={scene_id}]  (家庭: {home_name} / {home_id})"
-        return f"{idx}. {scene_name}  [scene_id={scene_id}]  (家庭: {home_name})"
+        line = f"{idx}. {scene_name}  [scene_id={scene_id}]"
+        if include_home:
+            home_name = scene.get("home_name") or "未知家庭"
+            line += f"  (家庭: {home_name})"
+        return line
 
     def _format_alias_line(self, idx: int, alias: str, did: str, category_map: Dict[str, str]) -> str:
         configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
@@ -311,6 +318,19 @@ class MiHomeControlPlugin(Star):
         if effective_category != CATEGORY_NONE:
             parts.append(f"[类别: {effective_category}]")
         return " ".join(parts)
+
+    @staticmethod
+    def _format_scene_error(error: Exception) -> str:
+        reason = str(error)
+        if reason == "scene_home_missing":
+            return "场景缓存缺少家庭 ID，请先刷新米家场景列表后重试。"
+        if reason == "scene_rejected":
+            return "米家云端拒绝执行该场景。"
+        if reason == "scene_unconfirmed":
+            return "米家云端没有确认场景执行成功，请检查设备真实状态。"
+        if reason == "cloud_no_response":
+            return "米家云端没有返回有效结果，请检查场景、设备和网络状态。"
+        return "场景执行失败，请查看诊断信息。"
 
     async def _resolve_scene_query(self, query: str, prefer_cache: bool = False) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         query = str(query or "").strip()
@@ -430,25 +450,13 @@ class MiHomeControlPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家登录")
     async def mihome_login(self, event: AstrMessageEvent):
-        """扫码授权米家账号"""
-        yield event.plain_result("⏳ 正在拉起独立沙盒环境...")
-
-        async def cb(url):
-            try:
-                await event.send(event.plain_result(f"🔔 请使用米家APP扫码授权：\n\n{url}"))
-            except Exception as e:
-                logger.error(f"[MiHome] 往客户端推送授权链接失败: {e}")
-
-        res = await self.client.login(qr_callback=cb)
-        s = res.get("status")
-        msg = {
-            "success": "🎉 授权成功！",
-            "timeout": "❌ 超时了。",
-            "qrcode_not_found": "⚠️ 未能抓取到链接。",
-            "already_logged_in": "✅ 您已登录。",
-            "in_progress": "⚠️ 登录流程正在进行中，请稍候。",
-        }.get(s, f"❌ 错误: {res.get('message')}")
-        yield event.plain_result(msg)
+        """引导管理员在内置管理页安全授权米家账号"""
+        yield event.plain_result(
+            "🔐 为避免二维码票据进入群聊或平台消息日志，v8 不再通过聊天发送"
+            "米家登录链接。\n"
+            "请打开 AstrBot WebUI → 插件管理 → astrbot_plugin_mihome → "
+            "米家管理，在“概览”中扫码授权。"
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家状态")
@@ -538,7 +546,7 @@ class MiHomeControlPlugin(Star):
 
             lines = [f"✅ 找到 {len(scenes)} 个场景："]
             for idx, item in enumerate(scenes, 1):
-                lines.append(self._format_scene_line(idx, item))
+                lines.append(self._format_scene_line(idx, item, include_home=True))
 
             lines.append("\n💡 执行方式：")
             lines.append("- /米家场景 场景名")
@@ -603,7 +611,7 @@ class MiHomeControlPlugin(Star):
         except MiHomeAuthError:
             yield event.plain_result("❌ 鉴权失效，请重新登录。")
         except MiHomeSceneError as e:
-            yield event.plain_result(f"❌ 场景执行失败: {e}")
+            yield event.plain_result(f"❌ {self._format_scene_error(e)}")
         except MiHomeClientError as e:
             yield event.plain_result(f"❌ API/网络异常: {e}")
         except Exception as e:
@@ -970,8 +978,12 @@ class MiHomeControlPlugin(Star):
         if matched_action:
             yield event.plain_result(f"⏳ 正在向【{alias}】执行动作 [{matched_action}]...")
             try:
-                await self.client.run_action(did, matched_action, alias)
-                yield event.plain_result("✅ 动作执行成功！")
+                confirmed = await self.client.run_action(did, matched_action, alias)
+                yield event.plain_result(
+                    "✅ 动作执行成功！"
+                    if confirmed
+                    else "⚠️ 米家网关已接收动作，但无法确认设备是否执行。"
+                )
             except MiHomeAuthError:
                 yield event.plain_result("❌ 鉴权失效，请重新登录。")
             except MiHomeControlError as e:
@@ -1006,8 +1018,16 @@ class MiHomeControlPlugin(Star):
             if token_lower in self.action_alias:
                 yield event.plain_result(f"⏳ 正在向【{alias}】下发开关指令...")
                 try:
-                    await self.client.control_power(did, self.action_alias[token_lower], alias)
-                    yield event.plain_result("✅ 成功！")
+                    confirmed = await self.client.control_power(
+                        did,
+                        self.action_alias[token_lower],
+                        alias,
+                    )
+                    yield event.plain_result(
+                        "✅ 成功！"
+                        if confirmed
+                        else "⚠️ 米家网关已接收指令，但无法确认设备是否执行。"
+                    )
                 except MiHomeAuthError:
                     yield event.plain_result("❌ 鉴权失效，请重新登录。")
                 except MiHomeControlError as e:
@@ -1034,8 +1054,12 @@ class MiHomeControlPlugin(Star):
                 )
                 yield event.plain_result(f"⏳ 正在向【{alias}】执行动作 [{eng_action}]...")
                 try:
-                    await self.client.run_action(did, eng_action, alias)
-                    yield event.plain_result("✅ 动作执行成功！")
+                    confirmed = await self.client.run_action(did, eng_action, alias)
+                    yield event.plain_result(
+                        "✅ 动作执行成功！"
+                        if confirmed
+                        else "⚠️ 米家网关已接收动作，但无法确认设备是否执行。"
+                    )
                 except MiHomeAuthError:
                     yield event.plain_result("❌ 鉴权失效，请重新登录。")
                 except MiHomeControlError as e:
@@ -1078,8 +1102,12 @@ class MiHomeControlPlugin(Star):
 
         yield event.plain_result(f"⏳ 正在向【{alias}】尝试下发属性 [{prop}]={val}...")
         try:
-            await self.client.set_property(did, prop, val, alias)
-            yield event.plain_result("✅ 属性下发成功！")
+            confirmed = await self.client.set_property(did, prop, val, alias)
+            yield event.plain_result(
+                "✅ 属性下发成功！"
+                if confirmed
+                else "⚠️ 米家网关已接收属性指令，但无法确认设备是否执行。"
+            )
         except MiHomeAuthError:
             yield event.plain_result("❌ 鉴权失效，请重新登录。")
         except MiHomeControlError as e:
@@ -1253,11 +1281,90 @@ class MiHomeControlPlugin(Star):
         except MiHomeAuthError:
             return "米家登录已失效，请先重新登录。"
         except MiHomeSceneError as e:
-            return f"场景执行失败：{e}"
+            return self._format_scene_error(e)
         except MiHomeClientError as e:
             return f"场景执行异常：{e}"
         except Exception as e:
             return f"内部错误：{e}"
+
+    @filter.llm_tool(name="list_mihome_devices")
+    async def list_mihome_devices_tool(self, event: AstrMessageEvent) -> str:
+        """
+        列出管理员已加入米家设备控制白名单的设备及静态能力概览。
+
+        使用限制：
+        1. 本工具只列出 control_tool.allowed_devices 中的别名，不返回 DID。
+        2. 本工具不会读取实时状态，也不会执行控制。
+        3. direct_control_supported=false 的设备只能检查，不能直接控制。
+        """
+        return await self.control_tools.list_devices(event)
+
+    @filter.llm_tool(name="inspect_mihome_device")
+    async def inspect_mihome_device_tool(
+        self,
+        event: AstrMessageEvent,
+        device_alias: str,
+    ) -> str:
+        """
+        检查白名单内一台米家设备的静态可控能力与云端观测能力。
+
+        云端观测结果仅用于诊断，不会自动扩大属性或动作白名单。
+        Args:
+            device_alias(string): 管理员已加入控制白名单的精确设备别名
+        """
+        return await self.control_tools.inspect_device(event, device_alias)
+
+    @filter.llm_tool(name="control_mihome_device")
+    async def control_mihome_device_tool(
+        self,
+        event: AstrMessageEvent,
+        device_alias: str,
+        operations: List[Dict[str, Any]],
+    ) -> str:
+        """
+        顺序设置白名单内米家设备的一个或多个静态可写属性。
+
+        使用限制：
+        1. 仅在用户明确要求控制设备时调用。
+        2. 单次最多 5 项，操作按顺序执行，部分成功不会自动回滚。
+        3. 只能使用 inspect_mihome_device 返回的 writable_properties。
+        4. 在工具返回明确成功前，不得向用户声称操作已经完成。
+        Args:
+            device_alias(string): 管理员已加入控制白名单的精确设备别名
+            operations(array[object]): 操作数组，每项格式为 {"prop": "属性", "value": "值"}
+        """
+        return await self.control_tools.control_device(
+            event,
+            device_alias,
+            operations,
+        )
+
+    @filter.llm_tool(name="call_mihome_action")
+    async def call_mihome_action_tool(
+        self,
+        event: AstrMessageEvent,
+        device_alias: str,
+        action: str,
+        params: Optional[List[Any]] = None,
+    ) -> str:
+        """
+        对白名单内米家设备执行静态画像明确允许的动作。
+
+        使用限制：
+        1. 仅在用户明确要求执行设备动作时调用。
+        2. 未经精确型号验证的动作不允许透传参数。
+        3. 在工具返回明确成功前，不得向用户声称动作已经完成。
+        Args:
+            device_alias(string): 管理员已加入控制白名单的精确设备别名
+            action(string): inspect_mihome_device 返回的动作 key 或中文名称
+            params(array): 可选动作参数数组；无参动作请留空
+        """
+        return await self.control_tools.call_action(
+            event,
+            device_alias,
+            action,
+            params,
+        )
 
     async def terminate(self):
         await self.web_api.terminate()

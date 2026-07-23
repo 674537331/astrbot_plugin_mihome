@@ -122,6 +122,12 @@ class _Config(dict):
         self.save_count += 1
 
 
+class _FailingConfig(_Config):
+    def save_config(self):
+        self.save_count += 1
+        raise RuntimeError("simulated persistence failure")
+
+
 class _DataManager:
     def __init__(self, state=None):
         self.state = state or {}
@@ -331,6 +337,83 @@ class WebAPIBehaviorTests(unittest.TestCase):
         self.assertEqual(redacted, "[米家登录输出已隐藏]")
         self.assertNotIn("secret-ticket", redacted)
 
+    def test_control_tool_requires_confirmation_and_valid_allowlist(self):
+        api, plugin = self.build_api(
+            {
+                "device_map": '{"客厅灯": "123"}',
+                "device_category_map": '{"客厅灯": "开关类别"}',
+            }
+        )
+        payload = {
+            "enable_readonly_tool": False,
+            "scene_tool": {"enable": False, "admin_only": True},
+            "control_tool": {
+                "enable": True,
+                "admin_only": True,
+                "allowed_devices": ["客厅灯"],
+            },
+        }
+        self.set_request_payload(payload)
+        with self.assertRaises(self.web.WebAPIError) as raised:
+            asyncio.run(api.save_tool_settings())
+        self.assertIn("confirm_control_tool", raised.exception.message)
+        self.assertNotIn("control_tool", plugin.config)
+
+        payload["confirm_control_tool"] = True
+        self.set_request_payload(payload)
+        response = asyncio.run(api.save_tool_settings())
+        self.assertTrue(response["payload"]["saved"])
+        self.assertEqual(
+            plugin.config["control_tool"]["allowed_devices"],
+            ["客厅灯"],
+        )
+
+    def test_control_tool_rejects_unmapped_alias(self):
+        api, plugin = self.build_api(
+            {
+                "device_map": '{"客厅灯": "123"}',
+                "device_category_map": '{"客厅灯": "开关类别"}',
+            }
+        )
+        self.set_request_payload(
+            {
+                "enable_readonly_tool": False,
+                "scene_tool": {"enable": False, "admin_only": True},
+                "control_tool": {
+                    "enable": True,
+                    "admin_only": True,
+                    "allowed_devices": ["不存在的别名"],
+                },
+                "confirm_control_tool": True,
+            }
+        )
+        with self.assertRaises(self.web.WebAPIError):
+            asyncio.run(api.save_tool_settings())
+        self.assertNotIn("control_tool", plugin.config)
+
+    def test_tool_settings_roll_back_exactly_when_persistence_fails(self):
+        original = {
+            "device_map": '{"客厅灯": "123"}',
+            "device_category_map": '{"客厅灯": "开关类别"}',
+        }
+        api, plugin = self.build_api()
+        plugin.config = _FailingConfig(original)
+        self.set_request_payload(
+            {
+                "enable_readonly_tool": True,
+                "scene_tool": {"enable": False, "admin_only": True},
+                "control_tool": {
+                    "enable": True,
+                    "admin_only": True,
+                    "allowed_devices": ["客厅灯"],
+                },
+                "confirm_control_tool": True,
+            }
+        )
+        with self.assertRaises(RuntimeError):
+            asyncio.run(api.save_tool_settings())
+        self.assertEqual(dict(plugin.config), original)
+
 
 class WebUIStaticContractTests(unittest.TestCase):
     def test_page_uses_bridge_without_direct_dashboard_access(self):
@@ -367,12 +450,16 @@ class WebUIStaticContractTests(unittest.TestCase):
         self.assertIn('confirm: "退出登录"', script)
         self.assertRegex(script, r"confirm\s*:\s*true")
         self.assertIn("confirm_public_scene_tool", script)
+        self.assertIn("confirm_control_tool", script)
+        self.assertIn("confirm_public_control_tool", script)
+        self.assertIn("data-control-alias", script)
         self.assertIn("root.text", script)
         self.assertNotIn("蒸烤锅类别", script)
 
     def test_qr_is_generated_locally_and_never_sent_to_third_party(self):
         backend = WEB_API_PATH.read_text(encoding="utf-8")
         client = (ROOT / "mihome_client.py").read_text(encoding="utf-8")
+        main = MAIN_PATH.read_text(encoding="utf-8")
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
         script = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
 
@@ -390,6 +477,30 @@ class WebUIStaticContractTests(unittest.TestCase):
             backend + script,
             r"https?://[^\"'\s]*(?:qrserver|quickchart|googleapis)",
         )
+        plugin_tree = ast.parse(main)
+        plugin_class = next(
+            node
+            for node in plugin_tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "MiHomeControlPlugin"
+        )
+        login_command = next(
+            node
+            for node in plugin_class.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "mihome_login"
+        )
+        login_source = ast.unparse(login_command)
+        self.assertNotIn("client.login", login_source)
+        self.assertNotIn("event.send", login_source)
+        self.assertNotIn("qr_callback", login_source)
+
+    def test_upstream_mijia_debug_logs_are_suppressed_before_import(self):
+        client = (ROOT / "mihome_client.py").read_text(encoding="utf-8")
+        worker = (ROOT / "_login_worker.py").read_text(encoding="utf-8")
+
+        guard = 'logging.getLogger("mijiaAPI").setLevel(logging.WARNING)'
+        self.assertIn(guard, client)
+        self.assertLess(client.index(guard), client.index("from mijiaAPI import"))
+        self.assertIn(guard, worker)
 
     def test_scene_tool_admin_check_uses_astrbot_event_only(self):
         tree = ast.parse(MAIN_PATH.read_text(encoding="utf-8"))
@@ -406,6 +517,7 @@ class WebUIStaticContractTests(unittest.TestCase):
         source = ast.unparse(checker)
         self.assertIn("event", source)
         self.assertIn("is_admin", source)
+        self.assertNotIn("role", source)
         self.assertNotIn("message_obj", source)
         self.assertNotIn("sender", source)
 
@@ -425,7 +537,7 @@ class WebUIStaticContractTests(unittest.TestCase):
         changelog = CHANGELOG_PATH.read_text(encoding="utf-8")
         self.assertRegex(
             changelog,
-            re.compile(r"^## \[v7\.4\.0\] - \d{4}-\d{2}-\d{2}$", re.MULTILINE),
+            re.compile(r"^## \[v8\.0\.0\] - 2026-07-24$", re.MULTILINE),
         )
 
         tree = ast.parse(MAIN_PATH.read_text(encoding="utf-8"))

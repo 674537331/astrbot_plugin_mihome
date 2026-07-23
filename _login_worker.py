@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
-logging.getLogger("mijiaAPI").setLevel(logging.INFO)
+logging.getLogger("mijiaAPI").setLevel(logging.WARNING)
 
 try:
     from mijiaAPI import mijiaAPI

@@ -277,10 +277,32 @@
                 <span class="setting-copy"><strong>仅管理员可调用场景 Tool</strong><small>强烈建议保持开启，避免普通成员触发真实家居动作。</small></span>
                 <span class="switch"><input id="tool-admin-only" type="checkbox"><span aria-hidden="true"></span></span>
               </label>
+              <label class="setting-row">
+                <span class="setting-icon is-orange"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 2h10a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H7Zm5 3a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-4 7h8v2H8v-2Z"/></svg></span>
+                <span class="setting-copy"><strong>设备控制 LLM Tool</strong><small>允许大模型控制白名单设备的静态可写属性与动作；默认关闭。</small></span>
+                <span class="switch"><input id="tool-control" type="checkbox"><span aria-hidden="true"></span></span>
+              </label>
+              <label class="setting-row is-nested" id="control-admin-only-row">
+                <span class="setting-icon is-green"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 1 5 5v2h2v13H5V9h2V7a5 5 0 0 1 5-5Zm3 7V7a3 3 0 0 0-6 0v2h6Zm-8 2v9h10v-9H7Z"/></svg></span>
+                <span class="setting-copy"><strong>仅 AstrBot 管理员可控制设备</strong><small>不会把群管理员自动视为 AstrBot 管理员，强烈建议保持开启。</small></span>
+                <span class="switch"><input id="tool-control-admin-only" type="checkbox"><span aria-hidden="true"></span></span>
+              </label>
+            </div>
+            <div class="control-allowlist" id="control-allowlist-panel">
+              <div class="allowlist-heading">
+                <div><strong>可控制设备白名单</strong><small>只显示已配置别名；留空时会失败关闭。</small></div>
+                <span id="control-allowlist-count">0 台</span>
+              </div>
+              <div class="allowlist-grid" id="control-allowlist"></div>
+              <div class="allowlist-empty" id="control-allowlist-empty">请先在“设备管理”中配置设备别名。</div>
             </div>
             <div class="risk-note" id="tool-risk-note" hidden>
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2 1 21h22L12 2Zm0 4 7.5 13h-15L12 6Zm-1 4v5h2v-5h-2Zm0 6v2h2v-2h-2Z"/></svg>
               <span>场景 Tool 对所有用户开放会增加误触发风险，请谨慎确认。</span>
+            </div>
+            <div class="risk-note" id="control-risk-note" hidden>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2 1 21h22L12 2Zm0 4 7.5 13h-15L12 6Zm-1 4v5h2v-5h-2Zm0 6v2h2v-2h-2Z"/></svg>
+              <span>设备控制 Tool 可改变真实家居状态；公开给非管理员的风险很高。</span>
             </div>
             <button class="button button-primary button-block" id="save-tools" type="button" disabled>保存 Tool 权限</button>
           </article>

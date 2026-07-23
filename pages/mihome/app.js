@@ -45,6 +45,7 @@ const DEVICE_CATEGORIES = Object.freeze([
   "扫地机类别",
   "热水器类别",
   "路由器类别",
+  "音箱类别",
   "开关类别",
   "门磁传感器类别",
   "燃气传感器类别",
@@ -80,6 +81,7 @@ const state = {
   tools: {
     enable_readonly_tool: false,
     scene_tool: { enable: false, admin_only: true },
+    control_tool: { enable: false, admin_only: true, allowed_devices: [] },
   },
   originalTools: "",
   diagnostics: {},
@@ -273,6 +275,7 @@ async function loadView(view, force) {
       await loadDevices(false);
     } else if (view === "scenes") {
       const tasks = [];
+      if (force || !state.loaded.devices) tasks.push(loadDevices(false));
       if (force || !state.loaded.scenes) tasks.push(loadScenes(false));
       if (force || !state.loaded.tools) tasks.push(loadTools());
       await Promise.allSettled(tasks);
@@ -605,6 +608,7 @@ async function loadDevices(sync = false) {
   state.loaded.devices = true;
   snapshotMappings();
   renderDevices();
+  if (state.loaded.tools) renderControlAllowlist();
   renderOverviewMetrics();
   return normalized;
 }
@@ -869,6 +873,7 @@ async function reviewAndSaveMappings() {
     snapshotMappings();
     renderDevices();
     renderOverviewMetrics();
+    if (state.loaded.tools) renderControlAllowlist();
     showToast("设备映射已保存", `共保留 ${mappings.length} 条映射`);
   } catch (error) {
     showToast("设备映射保存失败", getErrorMessage(error), "error");
@@ -1075,11 +1080,20 @@ async function syncScenes() {
 function normalizeTools(payload) {
   const root = payload && typeof payload === "object" ? payload : {};
   const scene = root.scene_tool && typeof root.scene_tool === "object" ? root.scene_tool : {};
+  const control = root.control_tool && typeof root.control_tool === "object" ? root.control_tool : {};
+  const allowed = Array.isArray(control.allowed_devices)
+    ? Array.from(new Set(control.allowed_devices.map((item) => text(item).trim()).filter(Boolean)))
+    : [];
   return {
     enable_readonly_tool: bool(root.enable_readonly_tool, false),
     scene_tool: {
       enable: bool(scene.enable ?? root.enable_scene_tool, false),
       admin_only: bool(scene.admin_only ?? root.scene_tool_admin_only, true),
+    },
+    control_tool: {
+      enable: bool(control.enable, false),
+      admin_only: bool(control.admin_only, true),
+      allowed_devices: allowed,
     },
   };
 }
@@ -1090,6 +1104,11 @@ function serializedTools(tools = state.tools) {
     scene_tool: {
       enable: Boolean(tools.scene_tool.enable),
       admin_only: Boolean(tools.scene_tool.admin_only),
+    },
+    control_tool: {
+      enable: Boolean(tools.control_tool.enable),
+      admin_only: Boolean(tools.control_tool.admin_only),
+      allowed_devices: [...tools.control_tool.allowed_devices].sort((a, b) => a.localeCompare(b, "zh-CN")),
     },
   });
 }
@@ -1104,11 +1123,19 @@ async function loadTools() {
 }
 
 function readToolsFromForm() {
+  const allowedDevices = $$("[data-control-alias]:checked")
+    .map((input) => text(input.dataset.controlAlias).trim())
+    .filter(Boolean);
   state.tools = {
     enable_readonly_tool: $("#tool-readonly").checked,
     scene_tool: {
       enable: $("#tool-scenes").checked,
       admin_only: $("#tool-admin-only").checked,
+    },
+    control_tool: {
+      enable: $("#tool-control").checked,
+      admin_only: $("#tool-control-admin-only").checked,
+      allowed_devices: Array.from(new Set(allowedDevices)),
     },
   };
   updateToolState();
@@ -1118,32 +1145,91 @@ function renderTools() {
   $("#tool-readonly").checked = Boolean(state.tools.enable_readonly_tool);
   $("#tool-scenes").checked = Boolean(state.tools.scene_tool.enable);
   $("#tool-admin-only").checked = Boolean(state.tools.scene_tool.admin_only);
+  $("#tool-control").checked = Boolean(state.tools.control_tool.enable);
+  $("#tool-control-admin-only").checked = Boolean(state.tools.control_tool.admin_only);
+  renderControlAllowlist();
   updateToolState();
+}
+
+function availableControlAliases() {
+  const aliases = [];
+  state.devices.forEach((device) => {
+    [device.alias, ...device.legacyMappings.map((mapping) => mapping.alias)].forEach((rawAlias) => {
+      const alias = text(rawAlias).trim();
+      if (alias && !aliases.includes(alias)) aliases.push(alias);
+    });
+  });
+  return aliases.sort((a, b) => a.localeCompare(b, "zh-CN"));
+}
+
+function renderControlAllowlist() {
+  const container = $("#control-allowlist");
+  if (!container) return;
+  const selected = new Set(state.tools.control_tool.allowed_devices);
+  const available = availableControlAliases();
+  const allAliases = [...available];
+  selected.forEach((alias) => {
+    if (!allAliases.includes(alias)) allAliases.push(alias);
+  });
+  allAliases.sort((a, b) => a.localeCompare(b, "zh-CN"));
+  container.replaceChildren();
+
+  allAliases.forEach((alias) => {
+    const mapped = available.includes(alias);
+    const label = createElement("label", `allowlist-option${mapped ? "" : " is-stale"}`);
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = selected.has(alias);
+    input.dataset.controlAlias = alias;
+    const marker = createElement("span", "allowlist-check");
+    const copy = createElement("span", "allowlist-name", alias);
+    if (!mapped) copy.append(createElement("small", "", "映射已失效，请取消勾选"));
+    label.append(input, marker, copy);
+    container.append(label);
+  });
+
+  $("#control-allowlist-empty").hidden = allAliases.length > 0;
+  setText("#control-allowlist-count", `${selected.size} 台`);
 }
 
 function updateToolState() {
   const dirty = serializedTools() !== state.originalTools;
-  const risky = state.tools.scene_tool.enable && !state.tools.scene_tool.admin_only;
+  const sceneRisky = state.tools.scene_tool.enable && !state.tools.scene_tool.admin_only;
+  const controlRisky = state.tools.control_tool.enable && !state.tools.control_tool.admin_only;
   $("#save-tools").disabled = !dirty;
-  $("#tool-risk-note").hidden = !risky;
+  $("#tool-risk-note").hidden = !sceneRisky;
+  $("#control-risk-note").hidden = !controlRisky;
+  $("#control-allowlist-panel").classList.toggle("is-active", state.tools.control_tool.enable);
+  setText("#control-allowlist-count", `${state.tools.control_tool.allowed_devices.length} 台`);
   const badge = $("#tool-save-state");
   badge.className = `status-badge is-${dirty ? "warning" : "neutral"}`;
   badge.textContent = dirty ? "有未保存修改" : "已同步";
 }
 
 async function saveTools() {
-  const risky = state.tools.scene_tool.enable && !state.tools.scene_tool.admin_only;
+  const sceneRisky = state.tools.scene_tool.enable && !state.tools.scene_tool.admin_only;
+  const controlEnabled = state.tools.control_tool.enable;
+  const controlRisky = controlEnabled && !state.tools.control_tool.admin_only;
+  const risky = sceneRisky || controlEnabled;
   const summary = [
     `设备只读 Tool：${state.tools.enable_readonly_tool ? "开启" : "关闭"}`,
     `场景 LLM Tool：${state.tools.scene_tool.enable ? "开启" : "关闭"}`,
     `场景 Tool 权限：${state.tools.scene_tool.admin_only ? "仅管理员" : "所有可调用用户"}`,
+    `设备控制 Tool：${controlEnabled ? "开启" : "关闭"}`,
+    `设备控制权限：${state.tools.control_tool.admin_only ? "仅 AstrBot 管理员" : "所有可调用用户"}`,
+    `设备控制白名单：${state.tools.control_tool.allowed_devices.length
+      ? state.tools.control_tool.allowed_devices.join("、")
+      : "空（不会控制任何设备）"}`,
   ];
-  if (risky) summary.push("风险提示：当前场景 Tool 未限制为仅管理员调用");
+  if (sceneRisky) summary.push("风险提示：当前场景 Tool 未限制为仅管理员调用");
+  if (controlRisky) summary.push("高风险提示：当前设备控制 Tool 未限制为仅管理员调用");
 
   const confirmed = await openDialog({
-    title: risky ? "确认开放场景 Tool？" : "保存 Tool 权限？",
-    message: risky
-      ? "场景可能触发真实家居动作。允许普通用户调用会增加误操作风险，请再次确认。"
+    title: controlEnabled ? "确认启用设备控制 Tool？" : sceneRisky ? "确认开放场景 Tool？" : "保存 Tool 权限？",
+    message: controlEnabled
+      ? "设备控制 Tool 可以改变真实家居状态。请确认管理员权限和设备白名单均符合预期。"
+      : sceneRisky
+        ? "场景可能触发真实家居动作。允许普通用户调用会增加误操作风险，请再次确认。"
       : "权限修改会立即影响大模型可以使用的米家能力。",
     summary,
     confirmLabel: risky ? "理解风险并保存" : "确认保存",
@@ -1156,7 +1242,9 @@ async function saveTools() {
   try {
     await apiPost(ENDPOINTS.tools, {
       ...state.tools,
-      ...(risky ? { confirm_public_scene_tool: true } : {}),
+      ...(sceneRisky ? { confirm_public_scene_tool: true } : {}),
+      ...(controlEnabled ? { confirm_control_tool: true } : {}),
+      ...(controlRisky ? { confirm_public_control_tool: true } : {}),
     });
     state.originalTools = serializedTools();
     updateToolState();
@@ -1420,6 +1508,11 @@ function bindEvents() {
   $("#tool-readonly").addEventListener("change", readToolsFromForm);
   $("#tool-scenes").addEventListener("change", readToolsFromForm);
   $("#tool-admin-only").addEventListener("change", readToolsFromForm);
+  $("#tool-control").addEventListener("change", readToolsFromForm);
+  $("#tool-control-admin-only").addEventListener("change", readToolsFromForm);
+  $("#control-allowlist").addEventListener("change", (event) => {
+    if (event.target.matches("[data-control-alias]")) readToolsFromForm();
+  });
 
   $("#device-list").addEventListener("input", (event) => {
     const input = event.target.closest("[data-device-alias]");
