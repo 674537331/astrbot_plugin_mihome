@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB_API_PATH = ROOT / "web_api.py"
 MAIN_PATH = ROOT / "main.py"
 METADATA_PATH = ROOT / "metadata.yaml"
+CHANGELOG_PATH = ROOT / "CHANGELOG.md"
 PAGE_DIR = ROOT / "pages" / "mihome"
 
 
@@ -412,10 +413,19 @@ class WebUIStaticContractTests(unittest.TestCase):
         metadata = METADATA_PATH.read_text(encoding="utf-8")
         self.assertRegex(
             metadata,
+            re.compile(r"^short_desc:\s*\S.+$", re.MULTILINE),
+        )
+        self.assertRegex(
+            metadata,
             re.compile(
                 r'^astrbot_version:\s*">=4\.24\.2"\s*$',
                 re.MULTILINE,
             ),
+        )
+        changelog = CHANGELOG_PATH.read_text(encoding="utf-8")
+        self.assertRegex(
+            changelog,
+            re.compile(r"^## \[v7\.4\.0\] - \d{4}-\d{2}-\d{2}$", re.MULTILINE),
         )
 
         tree = ast.parse(MAIN_PATH.read_text(encoding="utf-8"))

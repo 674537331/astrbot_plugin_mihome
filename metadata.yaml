@@ -1,6 +1,7 @@
 name: astrbot_plugin_mihome
 display_name: 米家控制
 desc: AstrBot 的米家云端智能管家插件
+short_desc: 安全连接米家云端，在 AstrBot 内管理设备、场景与智能家居。
 help: |
   发送 /米家帮助 查看完整指令总览；发送 /米家帮助 [设备别名] 查看设备专属控制示例。
 version: v7.4.0
