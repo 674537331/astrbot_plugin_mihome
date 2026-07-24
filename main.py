@@ -105,7 +105,7 @@ READONLY_ALLOWED_CATEGORIES = {
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.1.0")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.1.1")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)

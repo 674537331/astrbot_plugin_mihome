@@ -98,6 +98,57 @@ _SECRET_PATTERN = re.compile(
     r"([\"']?\s*[:=]\s*[\"']?)([^,\s\"'&}]+)"
 )
 
+_LOGIN_ERROR_SCOPE_MARKERS = {
+    "credential_storage": (
+        "存储路径",
+        "文件无法读取",
+        "文件安全检查",
+        "文件权限",
+        "数据目录",
+        "临时凭证清理",
+        "本地凭证尚未清理",
+        "本地登录凭证移除失败",
+        "账号缓存清理",
+        "状态备份",
+    ),
+    "authorization": (
+        "鉴权失效",
+        "鉴权过期",
+        "授权失效",
+        "凭证失效",
+        "凭证过期",
+        "登录已过期",
+        "login_expired",
+        "unauthorized",
+        "authentication failed",
+    ),
+    "cloud_connection": (
+        "拉取云端",
+        "同步异常",
+        "同步设备列表超时",
+        "网络异常",
+        "连接异常",
+        "通信异常",
+        "云端接口异常",
+        "network_error",
+        "ssl_error",
+        "cloud_api_error",
+        "device_sync_error",
+    ),
+    "login_flow": (
+        "授权确认已超时",
+        "未能提取登录链接",
+        "二维码",
+        "扫码",
+        "登录进程",
+        "登录任务",
+        "登录失败",
+        "登录输出",
+        "沙盒",
+        "qrcode",
+    ),
+}
+
 
 class WebAPIError(Exception):
     """可安全返回给管理页面的请求错误。"""
@@ -120,6 +171,51 @@ def _redact_text(value: Any, *, limit: int = MAX_ERROR_LENGTH) -> str:
     if len(text) > limit:
         return f"{text[:limit]}…"
     return text
+
+
+def _classify_login_error_scope(
+    value: Any,
+    *,
+    credential_present: bool,
+) -> str:
+    """区分授权、凭证存储、登录流程与云端连接错误。
+
+    ``last_login_error`` 是旧状态字段，历史上也被设备同步的网络错误复用。
+    WebUI 只能把明确的鉴权失败标为授权问题，避免把临时网络故障误报为
+    “授权异常”。未知错误在没有凭证时按登录流程处理；已有凭证时保留为
+    一般账号问题。
+    """
+
+    message = str(value or "").strip().casefold()
+    if not message:
+        return ""
+    for scope in (
+        "credential_storage",
+        "authorization",
+        "cloud_connection",
+        "login_flow",
+    ):
+        if any(
+            marker.casefold() in message
+            for marker in _LOGIN_ERROR_SCOPE_MARKERS[scope]
+        ):
+            return scope
+    return "unknown" if credential_present else "login_flow"
+
+
+def _credential_state(credential_present: bool, error_scope: str) -> str:
+    if error_scope == "credential_storage":
+        return "attention"
+    if credential_present and error_scope == "authorization":
+        return "invalid"
+    return "present" if credential_present else "missing"
+
+
+def _effective_login_error(login: dict[str, Any]) -> str:
+    return _redact_text(
+        login.get("credential_storage_error")
+        or login.get("last_login_error")
+    )
 
 
 def _build_qr_data_uri(content: str) -> str:
@@ -742,11 +838,34 @@ class MiHomeWebAPI:
     # 概览与登录
     # ------------------------------------------------------------------
 
+    def _reconcile_login_result(self, login: dict[str, Any]) -> None:
+        state_recovered = bool(login.get("login_state_recovered")) or (
+            bool(login.get("auth_exists"))
+            and not login.get("credential_storage_error")
+            and not login.get("last_login_error")
+        )
+        if not state_recovered:
+            return
+        if self._login_result.get("status") != "error":
+            return
+        detail = str(self._login_result.get("detail") or "")
+        if "插件状态记录保存失败" not in detail:
+            return
+        self._login_result = {
+            "status": "success",
+            "message": "授权成功。",
+        }
+
     async def get_status(self):
         state = self._data_manager.load_state()
         login = await self._client.get_login_status(state)
+        self._reconcile_login_result(login)
         credential_present = bool(login.get("auth_exists"))
-        login_error = _redact_text(login.get("last_login_error"))
+        login_error = _effective_login_error(login)
+        login_error_scope = _classify_login_error_scope(
+            login_error,
+            credential_present=credential_present,
+        )
         rows = self._cached_device_rows(state)
         scenes = self._sanitized_scenes(state)
         device_map, _category_map, mapping_errors = self._mapping_snapshot()
@@ -761,12 +880,9 @@ class MiHomeWebAPI:
                 "ok": True,
                 "auth": {
                     "credential_present": credential_present,
-                    "credential_state": (
-                        "attention"
-                        if credential_present and login_error
-                        else "present"
-                        if credential_present
-                        else "missing"
+                    "credential_state": _credential_state(
+                        credential_present,
+                        login_error_scope,
                     ),
                     "logged_in": credential_present,
                     "login_in_progress": bool(
@@ -777,6 +893,10 @@ class MiHomeWebAPI:
                     ),
                     "last_login_at": str(login.get("last_login_at") or ""),
                     "last_login_error": login_error,
+                    "last_error_scope": login_error_scope,
+                    "authorization_problem": (
+                        login_error_scope == "authorization"
+                    ),
                 },
                 "summary": {
                     "cloud_device_count": sum(
@@ -852,7 +972,10 @@ class MiHomeWebAPI:
             self._login_qr_revision = str(self._login_qr_generation)
             self._login_result = {
                 "status": "waiting_scan",
-                "message": "请使用米家 App 扫码并确认授权。",
+                "message": (
+                    "推荐使用小米账号“扫一扫”；米家等小米应用或"
+                    "微信、微博、QQ 也可扫码。"
+                ),
             }
 
         try:
@@ -925,26 +1048,31 @@ class MiHomeWebAPI:
 
     async def get_auth_status(self):
         login = await self._client.get_login_status()
+        self._reconcile_login_result(login)
         credential_present = bool(login.get("auth_exists"))
-        login_error = _redact_text(login.get("last_login_error"))
         known_qr_revision = str(
             request.query.get("qr_revision") or ""
         ).strip()[:64]
+        login_payload = self._login_status_payload(known_qr_revision)
+        login_error = _effective_login_error(login)
+        login_error_scope = _classify_login_error_scope(
+            login_error,
+            credential_present=credential_present,
+        )
         return _sensitive_json_response(
             {
                 "ok": True,
-                **self._login_status_payload(known_qr_revision),
+                **login_payload,
                 "credential_present": credential_present,
-                "credential_state": (
-                    "attention"
-                    if credential_present and login_error
-                    else "present"
-                    if credential_present
-                    else "missing"
+                "credential_state": _credential_state(
+                    credential_present,
+                    login_error_scope,
                 ),
                 "logged_in": credential_present,
                 "last_login_at": str(login.get("last_login_at") or ""),
                 "last_login_error": login_error,
+                "last_error_scope": login_error_scope,
+                "authorization_problem": login_error_scope == "authorization",
             }
         )
 
@@ -1552,14 +1680,32 @@ class MiHomeWebAPI:
                 }
             )
 
-        if login.get("auth_exists") and login.get("last_login_error"):
+        credential_present = bool(login.get("auth_exists"))
+        login_error = _effective_login_error(login)
+        login_error_scope = _classify_login_error_scope(
+            login_error,
+            credential_present=credential_present,
+        )
+
+        if login_error_scope == "authorization":
             add(
                 "auth",
-                "warning",
-                "登录凭证",
-                "已检测到米家登录凭证，但近期存在登录或连接异常。",
+                "error",
+                "账号授权",
+                (
+                    "米家云端已拒绝当前登录凭证，请重新授权。"
+                    if credential_present
+                    else "米家账号授权未完成，请重新扫码登录。"
+                ),
             )
-        elif login.get("auth_exists"):
+        elif login_error_scope == "credential_storage":
+            add(
+                "auth",
+                "error",
+                "凭证存储",
+                "登录凭证或插件数据目录需要检查。",
+            )
+        elif credential_present:
             add("auth", "success", "登录凭证", "已检测到米家登录凭证。")
         else:
             add(
@@ -1567,6 +1713,28 @@ class MiHomeWebAPI:
                 "warning",
                 "登录凭证",
                 "尚未登录米家账号，请先完成扫码授权。",
+            )
+
+        if login_error_scope == "cloud_connection":
+            add(
+                "cloud_connection",
+                "warning",
+                "云端连接",
+                login_error,
+            )
+        elif login_error_scope == "login_flow":
+            add(
+                "login_flow",
+                "warning",
+                "扫码登录",
+                login_error,
+            )
+        elif login_error_scope == "unknown":
+            add(
+                "account_status",
+                "warning",
+                "账号状态",
+                login_error,
             )
 
         if mapping_errors:
@@ -1698,8 +1866,14 @@ class MiHomeWebAPI:
                 "设备控制 Tool 已关闭。",
             )
 
+        login_error_title = {
+            "authorization": "最近授权异常",
+            "credential_storage": "最近凭证存储异常",
+            "cloud_connection": "最近云端连接异常",
+            "login_flow": "最近扫码登录异常",
+        }.get(login_error_scope, "最近账号异常")
         error_fields = (
-            ("last_login_error", "最近登录异常"),
+            ("last_login_error", login_error_title),
             ("last_shared_error", "共享设备异常"),
             ("last_scene_error", "最近场景异常"),
             ("last_control_error", "最近设备控制异常"),

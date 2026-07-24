@@ -132,15 +132,20 @@
             </div>
             <div class="auth-panel" id="auth-panel" hidden>
               <div class="qr-frame">
-                <img id="auth-qr-image" alt="米家登录二维码" hidden>
+                <img id="auth-qr-image" alt="小米账号登录二维码" hidden>
                 <div class="qr-placeholder" id="auth-qr-placeholder">
                   <span class="spinner" aria-hidden="true"></span>
                   <span>等待二维码</span>
                 </div>
               </div>
-              <div>
-                <strong>请使用米家 App 扫码</strong>
-                <p id="auth-progress">二维码生成后，请在米家 App 中确认授权。</p>
+              <div class="auth-copy">
+                <strong>扫码登录小米账号</strong>
+                <p id="auth-progress">正在生成登录二维码。</p>
+                <div class="scan-methods" aria-label="支持的扫码方式">
+                  <p><span>推荐入口</span>小米手机：设置 → 小米账号 → 右上角“扫一扫”</p>
+                  <p><span>其他入口</span>米家、小米商城、小爱音箱，或微信、微博、QQ“扫一扫”</p>
+                </div>
+                <p class="scan-caution"><strong>若米家停留在“扫描设备或说明书二维码”页面且无法识别，请改用上面的推荐入口或微信、QQ。</strong>二维码约 2 分钟有效，请勿分享。</p>
               </div>
             </div>
             <div class="button-row">

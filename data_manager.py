@@ -307,3 +307,21 @@ class MiHomeDataManager:
                 return True
             state.update(kwargs)
             return self.save_state(state)
+
+    def compare_and_update_state(
+        self,
+        expected_state: Dict[str, Any],
+        **kwargs,
+    ) -> tuple[str, Dict[str, Any]]:
+        """仅在状态未变化时强制合并保存，并返回保存后的实际快照。"""
+
+        with self._state_lock:
+            current_state = self.load_state()
+            if current_state != expected_state:
+                return "changed", current_state
+
+            target_state = dict(current_state)
+            target_state.update(kwargs)
+            saved = self.save_state(target_state)
+            observed_state = self.load_state()
+            return ("saved" if saved else "failed"), observed_state

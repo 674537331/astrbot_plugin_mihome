@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import ast
+import base64
 import importlib.util
 import json
 import os
@@ -815,6 +816,57 @@ class DataManagerCredentialTests(unittest.TestCase):
 
             save_state.assert_not_called()
 
+    def test_compare_and_update_state_does_not_overwrite_newer_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+            manager.state_path.write_text(
+                '{"revision": 2, "devices": ["did-new"]}',
+                encoding="utf-8",
+            )
+
+            result, observed = manager.compare_and_update_state(
+                {"revision": 1, "devices": ["did-old"]},
+                last_login_error="",
+            )
+
+            self.assertEqual(result, "changed")
+            self.assertEqual(
+                observed,
+                {"revision": 2, "devices": ["did-new"]},
+            )
+            self.assertEqual(manager.load_state(), observed)
+
+    def test_compare_and_update_keeps_observed_replace_on_harden_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+            baseline = {"last_login_error": "鉴权失效"}
+            manager.state_path.write_text(
+                json.dumps(baseline, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                manager,
+                "_harden_path",
+                side_effect=[True, False],
+            ):
+                result, observed = manager.compare_and_update_state(
+                    baseline,
+                    last_login_error="",
+                )
+
+            self.assertEqual(result, "failed")
+            self.assertEqual(observed, {"last_login_error": ""})
+            self.assertEqual(manager.load_state(), observed)
+
     def test_corrupt_state_is_backed_up_before_atomic_recovery(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = object.__new__(data_manager_module.MiHomeDataManager)
@@ -1000,12 +1052,32 @@ class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
         client.data_manager = MagicMock()
         client.data_manager.auth_exists.return_value = True
         client.data_manager.update_state.return_value = True
+        client.data_manager.load_state.return_value = {
+            "last_login_error": "网络异常: ConnectTimeout",
+        }
         client.api = types.SimpleNamespace(
             get_devices_list=MagicMock(return_value=[]),
         )
 
         self.assertEqual(await client.get_devices(), [])
         self.assertEqual(client._prepared_device_cache, {})
+        client.data_manager.update_state.assert_called_once_with(
+            last_login_error="",
+            last_shared_error="",
+            did_to_name={},
+            did_to_model={},
+        )
+
+        client.data_manager.update_state.reset_mock()
+        client.data_manager.load_state.return_value = {
+            "last_login_error": "登录凭证文件无法读取，请检查文件权限",
+        }
+        self.assertEqual(await client.get_devices(), [])
+        client.data_manager.update_state.assert_called_once_with(
+            last_shared_error="",
+            did_to_name={},
+            did_to_model={},
+        )
 
     async def test_scene_requires_explicit_true_result(self):
         async def run_case(result):
@@ -1098,11 +1170,21 @@ class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
     async def test_callback_error_stops_worker_and_cleans_new_auth(self):
         class FakeStdout:
             def __init__(self):
+                login_url = (
+                    "https://ak.account.xiaomi.com/longPolling/login?"
+                    "opaque=direct-login"
+                )
+                encoded = base64.urlsafe_b64encode(
+                    login_url.encode("utf-8")
+                ).decode("ascii")
+                payload = (
+                    f"{client_module.WORKER_QR_PAYLOAD_START}{encoded}"
+                    f"{client_module.WORKER_QR_PAYLOAD_END}"
+                ).encode("ascii")
+                split_at = len(payload) // 2
                 self.chunks = [
-                    (
-                        b"https://account.xiaomi.com/pass/qr/login?"
-                        b"ticket=t&dc=d&sid=mijia"
-                    ),
+                    payload[:split_at],
+                    payload[split_at:],
                     b"",
                 ]
 
@@ -1168,6 +1250,91 @@ class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
         data_manager.clear_auth_file.assert_called_once_with()
         self.assertIsNone(client._login_process)
         self.assertEqual(client._login_status, client_module.LOGIN_IDLE)
+
+    async def test_login_reports_state_persistence_failure(self):
+        class EmptyStdout:
+            async def read(self, _size):
+                return b""
+
+        class CompleteProcess:
+            returncode = 0
+            stdout = EmptyStdout()
+
+            async def wait(self):
+                return 0
+
+        client = object.__new__(client_module.MiHomeClient)
+        client.data_manager = MagicMock()
+        client.data_manager.auth_storage_is_secure.return_value = True
+        client.data_manager.auth_exists.side_effect = [
+            False,
+            True,
+            True,
+            True,
+        ]
+        client.data_manager.get_auth_path.return_value = "auth.json"
+        client.data_manager.harden_auth_file.return_value = True
+        client.data_manager.update_state.return_value = False
+        client.data_manager.load_state.return_value = {
+            "last_login_error": "鉴权失效",
+        }
+        client.data_manager.compare_and_update_state.return_value = (
+            "failed",
+            {"last_login_error": "鉴权失效"},
+        )
+        client._api_lock = asyncio.Lock()
+        client._login_generation = 0
+        client._login_process = None
+        client._login_status = client_module.LOGIN_IDLE
+        client._worker_script = "_login_worker.py"
+        client._initialize_api = MagicMock()
+
+        with patch.object(
+            client_module.asyncio,
+            "create_subprocess_exec",
+            AsyncMock(return_value=CompleteProcess()),
+        ):
+            result = await client.login(MagicMock())
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("插件状态记录保存失败", result["message"])
+        client._initialize_api.assert_called_once_with()
+        pending_status = await client.get_login_status(
+            {"last_login_error": "鉴权失效"},
+        )
+        self.assertIn(
+            "插件状态记录保存失败",
+            pending_status["credential_storage_error"],
+        )
+        recovered_state = {
+            "last_login_at": client._pending_login_state["last_login_at"],
+            "last_login_error": "",
+        }
+        client.data_manager.compare_and_update_state.return_value = (
+            "saved",
+            recovered_state,
+        )
+        recovered_status = await client.get_login_status(
+            {"last_login_error": "鉴权失效"},
+        )
+        self.assertTrue(recovered_status["login_state_recovered"])
+        self.assertEqual(recovered_status["credential_storage_error"], "")
+
+        client._pending_login_state = {
+            "last_login_at": "2026-07-24 12:00:00",
+            "last_login_error": "",
+        }
+        client._pending_login_state_baseline = {
+            "last_login_error": "鉴权失效",
+        }
+        replaced_status = await client.get_login_status(
+            {"last_login_error": "网络异常: ConnectTimeout"},
+        )
+        self.assertEqual(replaced_status["credential_storage_error"], "")
+        self.assertEqual(
+            replaced_status["last_login_error"],
+            "网络异常: ConnectTimeout",
+        )
 
     async def test_login_timeout_cleans_residual_new_auth(self):
         class EmptyStdout:

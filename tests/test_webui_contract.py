@@ -1,6 +1,9 @@
+import base64
 import asyncio
 import ast
+import contextlib
 import importlib.util
+import io
 import json
 import re
 import sys
@@ -117,6 +120,18 @@ def load_mihome_client_module():
     return module
 
 
+def load_login_worker_module():
+    module_name = "_mihome_login_worker_test"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        ROOT / "_login_worker.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class _Config(dict):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -146,7 +161,7 @@ class _Client:
     async def get_login_status(self, state=None):
         state = state or {}
         return {
-            "auth_exists": False,
+            "auth_exists": bool(state.get("auth_exists", False)),
             "last_login_at": state.get("last_login_at", ""),
             "last_login_error": state.get("last_login_error", ""),
             "scene_cache_updated_at": state.get(
@@ -409,6 +424,134 @@ class WebAPIBehaviorTests(unittest.TestCase):
         self.assertTrue(response["payload"]["ok"])
         self.assertEqual(plugin.data_manager.load_count, 1)
 
+    def test_status_keeps_cloud_failure_out_of_authorization_state(self):
+        api, _plugin = self.build_api(
+            state={
+                "auth_exists": True,
+                "last_login_error": "拉取云端设备列表超时",
+            }
+        )
+
+        auth = asyncio.run(api.get_status())["payload"]["auth"]
+
+        self.assertEqual(auth["last_error_scope"], "cloud_connection")
+        self.assertEqual(auth["credential_state"], "present")
+        self.assertFalse(auth["authorization_problem"])
+
+    def test_status_marks_explicit_auth_failure_as_invalid(self):
+        api, _plugin = self.build_api(
+            state={
+                "auth_exists": True,
+                "last_login_error": "鉴权失效",
+            }
+        )
+
+        auth = asyncio.run(api.get_status())["payload"]["auth"]
+
+        self.assertEqual(auth["last_error_scope"], "authorization")
+        self.assertEqual(auth["credential_state"], "invalid")
+        self.assertTrue(auth["authorization_problem"])
+
+    def test_auth_poll_prefers_current_terminal_login_detail(self):
+        api, plugin = self.build_api()
+
+        async def get_login_status(_state=None):
+            return {
+                "auth_exists": True,
+                "last_login_error": "鉴权失效",
+                "credential_storage_error": (
+                    "登录凭证已保存，但插件状态记录保存失败，"
+                    "请检查数据目录权限"
+                ),
+            }
+
+        plugin.client = types.SimpleNamespace(
+            get_login_status=get_login_status,
+        )
+        api._login_result = {
+            "status": "error",
+            "message": "登录失败，请查看诊断信息或 AstrBot 日志。",
+            "detail": (
+                "登录凭证已保存，但插件状态记录保存失败，"
+                "请检查数据目录权限"
+            ),
+        }
+
+        auth = asyncio.run(api.get_auth_status())["payload"]
+
+        self.assertEqual(auth["last_error_scope"], "credential_storage")
+        self.assertEqual(auth["credential_state"], "attention")
+        self.assertFalse(auth["authorization_problem"])
+        self.assertIn("插件状态记录保存失败", auth["last_login_error"])
+        overview_auth = asyncio.run(api.get_status())["payload"]["auth"]
+        self.assertEqual(
+            overview_auth["last_error_scope"],
+            "credential_storage",
+        )
+        self.assertEqual(
+            overview_auth["last_login_error"],
+            auth["last_login_error"],
+        )
+
+    def test_auth_poll_converts_recovered_state_write_to_success(self):
+        api, plugin = self.build_api()
+
+        async def get_login_status(_state=None):
+            return {
+                "auth_exists": True,
+                "last_login_at": "2026-07-24 12:00:00",
+                "last_login_error": "",
+                "credential_storage_error": "",
+                "login_state_recovered": True,
+            }
+
+        plugin.client = types.SimpleNamespace(
+            get_login_status=get_login_status,
+        )
+        api._login_result = {
+            "status": "error",
+            "message": "登录失败，请查看诊断信息或 AstrBot 日志。",
+            "detail": (
+                "登录凭证已保存，但插件状态记录保存失败，"
+                "请检查数据目录权限"
+            ),
+        }
+
+        auth = asyncio.run(api.get_auth_status())["payload"]
+
+        self.assertEqual(auth["status"], "success")
+        self.assertEqual(auth["detail"], "")
+        self.assertEqual(auth["last_login_error"], "")
+
+    def test_status_distinguishes_failed_login_flow_without_credentials(self):
+        api, _plugin = self.build_api(
+            state={
+                "auth_exists": False,
+                "last_login_error": "授权确认已超时 (120秒)",
+            }
+        )
+
+        auth = asyncio.run(api.get_status())["payload"]["auth"]
+
+        self.assertEqual(auth["last_error_scope"], "login_flow")
+        self.assertEqual(auth["credential_state"], "missing")
+        self.assertFalse(auth["authorization_problem"])
+
+    def test_diagnostics_separates_saved_credentials_and_cloud_failure(self):
+        api, _plugin = self.build_api()
+
+        checks = api._diagnostic_checks(
+            {
+                "auth_exists": True,
+                "last_login_error": "网络异常: ConnectionError",
+            }
+        )
+        by_code = {item["code"]: item for item in checks}
+
+        self.assertEqual(by_code["auth"]["level"], "success")
+        self.assertEqual(by_code["cloud_connection"]["level"], "warning")
+        self.assertIn("网络异常", by_code["cloud_connection"]["message"])
+
     def test_device_snapshot_discards_unused_upstream_fields(self):
         snapshot = self.web.MiHomeWebAPI._compact_device_snapshot(
             [
@@ -436,7 +579,10 @@ class WebAPIBehaviorTests(unittest.TestCase):
         async def scenario():
             task = asyncio.create_task(asyncio.sleep(60))
             api._login_task = task
-            api._login_qr_url = "https://account.xiaomi.com/pass/qr/login?ticket=secret"
+            api._login_qr_url = (
+                "https://ak.account.xiaomi.com/longPolling/login?"
+                "opaque=secret"
+            )
             api._login_qr_image = "data:image/svg+xml;base64,PHN2Zy8+"
             api._login_qr_created_at = self.web.time.monotonic()
             api._login_qr_revision = "7"
@@ -486,14 +632,121 @@ class WebAPIBehaviorTests(unittest.TestCase):
 
     def test_multiline_login_url_is_fully_hidden(self):
         client = object.__new__(self.client_module.MiHomeClient)
+        login_url = (
+            "https://ak.account.xiaomi.com/longPolling/login?"
+            "opaque=secret-ticket"
+        )
+        encoded = base64.urlsafe_b64encode(login_url.encode()).decode()
+        split_at = len(encoded) // 2
         redacted = client._redact_login_output(
             "开始登录\n"
-            "https://account.xiaomi.com/pass/qr/login?tic\n"
-            "ket=secret-ticket&dc=cn&sid=mihome\n"
+            f"{self.client_module.WORKER_QR_PAYLOAD_START}"
+            f"{encoded[:split_at]}\n{encoded[split_at:]}"
+            f"{self.client_module.WORKER_QR_PAYLOAD_END}\n"
             "DEBUG: worker stopped"
         )
         self.assertEqual(redacted, "[米家登录输出已隐藏]")
         self.assertNotIn("secret-ticket", redacted)
+
+    def test_worker_passes_direct_login_url_and_reuses_login_data(self):
+        worker = load_login_worker_module()
+        client = object.__new__(self.client_module.MiHomeClient)
+        login_data = {
+            "loginUrl": (
+                "https://ak.account.xiaomi.com/longPolling/login?"
+                "opaque=direct-login"
+            ),
+            "qr": (
+                "https://account.xiaomi.com/pass/qr/login?"
+                "opaque=image-resource"
+            ),
+            "lp": "https://account.xiaomi.com/longPolling/login?opaque=wait",
+        }
+
+        class FakeAPI:
+            auth_data = {}
+
+            def __init__(self):
+                self.completed_with = None
+
+            def _get_qr_login_data(self):
+                return login_data
+
+            def _complete_qr_login(self, value):
+                self.completed_with = value
+                return {"status": "ok"}
+
+        api = FakeAPI()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = worker._login_with_direct_qr(api)
+
+        worker_output = output.getvalue()
+        self.assertEqual(result, {"status": "ok"})
+        self.assertIs(api.completed_with, login_data)
+        self.assertNotIn(login_data["loginUrl"], worker_output)
+        self.assertNotIn(login_data["qr"], worker_output)
+        self.assertNotIn(login_data["lp"], worker_output)
+        self.assertEqual(
+            client._extract_qr_url_from_buffer(worker_output),
+            login_data["loginUrl"],
+        )
+
+    def test_worker_refresh_path_does_not_emit_qr(self):
+        worker = load_login_worker_module()
+
+        class FakeAPI:
+            auth_data = {"refreshed": True}
+
+            @staticmethod
+            def _get_qr_login_data():
+                return {"refreshed": True}
+
+            @staticmethod
+            def _complete_qr_login(_value):
+                raise AssertionError("刷新成功后不应进入扫码长轮询")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = worker._login_with_direct_qr(FakeAPI())
+
+        self.assertEqual(result, {"refreshed": True})
+        self.assertNotIn(worker.WORKER_QR_PAYLOAD_START, output.getvalue())
+
+    def test_qr_image_url_without_worker_marker_is_ignored(self):
+        client = object.__new__(self.client_module.MiHomeClient)
+        image_url = (
+            "https://account.xiaomi.com/pass/qr/login?"
+            "opaque=image-resource"
+        )
+        self.assertEqual(
+            client._extract_qr_url_from_buffer(
+                f"也可以访问链接查看二维码图片: {image_url}"
+            ),
+            "",
+        )
+        encoded = base64.urlsafe_b64encode(image_url.encode()).decode()
+        marked_payload = (
+            f"{self.client_module.WORKER_QR_PAYLOAD_START}{encoded}"
+            f"{self.client_module.WORKER_QR_PAYLOAD_END}"
+        )
+        self.assertEqual(
+            client._extract_qr_url_from_buffer(marked_payload),
+            "",
+        )
+
+    def test_login_payload_rejects_lookalike_domain(self):
+        client = object.__new__(self.client_module.MiHomeClient)
+        malicious = (
+            "https://account.xiaomi.com.example.test/longPolling/login?"
+            "opaque=malicious"
+        )
+        encoded = base64.urlsafe_b64encode(malicious.encode()).decode()
+        payload = (
+            f"{self.client_module.WORKER_QR_PAYLOAD_START}{encoded}"
+            f"{self.client_module.WORKER_QR_PAYLOAD_END}"
+        )
+        self.assertEqual(client._extract_qr_url_from_buffer(payload), "")
 
     def test_logout_clears_account_snapshot_and_preserves_mappings(self):
         api, plugin = self.build_api(
@@ -786,6 +1039,35 @@ class WebUIStaticContractTests(unittest.TestCase):
     def test_frontend_does_not_overstate_credential_validity(self):
         script = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
         self.assertIn("credential_present", script)
+        self.assertIn("accountErrorScope", script)
+        self.assertIn("authorization", script)
+        self.assertIn("cloud_connection", script)
+        self.assertIn("login_flow", script)
+        self.assertIn("授权已失效", script)
+        self.assertIn("云端连接异常", script)
+        self.assertIn("登录未完成", script)
+        self.assertIn(
+            "if (!running && (auth.last_login_error || auth.error))",
+            script,
+        )
+        self.assertIn("shouldContinue = running", script)
+        self.assertIn("authPolling: false", script)
+        self.assertIn("authPollPending: false", script)
+        self.assertIn("if (state.authPolling)", script)
+        self.assertIn("state.authPolling = false", script)
+        self.assertIn(
+            "if (shouldContinue || pending) scheduleAuthPoll()",
+            script,
+        )
+        poll_start = script.index("async function pollAuthStatus()")
+        self.assertLess(
+            script.index("if (terminalFailure)", poll_start),
+            script.index("if (isLoggedIn(auth) && !running)", poll_start),
+        )
+        self.assertLess(
+            script.index("? SCAN_GUIDANCE", script.index('"#account-description"')),
+            script.index(": loginError ||", script.index('"#account-description"')),
+        )
         self.assertNotIn("授权有效", script)
         self.assertNotIn("登录凭证当前可用", script)
         self.assertNotIn("服务正常", script)
@@ -799,8 +1081,10 @@ class WebUIStaticContractTests(unittest.TestCase):
     def test_qr_is_generated_locally_and_never_sent_to_third_party(self):
         backend = WEB_API_PATH.read_text(encoding="utf-8")
         client = (ROOT / "mihome_client.py").read_text(encoding="utf-8")
+        worker = (ROOT / "_login_worker.py").read_text(encoding="utf-8")
         main = MAIN_PATH.read_text(encoding="utf-8")
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        html = (PAGE_DIR / "index.html").read_text(encoding="utf-8")
         script = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
 
         self.assertIn("_build_qr_data_uri", backend)
@@ -811,6 +1095,10 @@ class WebUIStaticContractTests(unittest.TestCase):
         self.assertNotIn('"qr_url": qr_url', backend)
         self.assertIn("self._extract_qr_url_from_buffer(raw)", client)
         self.assertIn("[米家登录输出已隐藏]", client)
+        self.assertIn('login_data.get("loginUrl")', worker)
+        self.assertIn("complete_login(login_data)", worker)
+        self.assertIn("urlsafe_b64encode", worker)
+        self.assertNotIn("api.login()", worker)
         self.assertRegex(requirements, r"(?m)^qrcode==8\.2$")
         self.assertIn("svg\\+xml", script)
         self.assertIn("state.authQrRevision", script)
@@ -819,6 +1107,11 @@ class WebUIStaticContractTests(unittest.TestCase):
         self.assertIn("requestId !== state.drawerRequestId", script)
         self.assertNotIn("normalizeAuthUrl", script)
         self.assertNotIn("auth-link", script)
+        self.assertIn("设置 → 小米账号 → 右上角“扫一扫”", html)
+        self.assertIn("米家、小米商城、小爱音箱", html)
+        self.assertIn("微信、微博、QQ“扫一扫”", html)
+        self.assertIn("扫描设备或说明书二维码", html)
+        self.assertNotIn("请勿使用米家", backend + html + script)
         self.assertNotRegex(
             backend + script,
             r"https?://[^\"'\s]*(?:qrserver|quickchart|googleapis)",
@@ -883,7 +1176,7 @@ class WebUIStaticContractTests(unittest.TestCase):
         changelog = CHANGELOG_PATH.read_text(encoding="utf-8")
         self.assertRegex(
             changelog,
-            re.compile(r"^## \[v8\.1\.0\] - 2026-07-24$", re.MULTILINE),
+            re.compile(r"^## \[v8\.1\.1\] - 2026-07-24$", re.MULTILINE),
         )
 
         tree = ast.parse(MAIN_PATH.read_text(encoding="utf-8"))

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import base64
 import re
 import os
 import sys
@@ -74,6 +75,17 @@ SPEC_FETCH_TIMEOUT = 25.0
 PREPARED_DEVICE_CACHE_TTL = 60.0
 PREPARED_DEVICE_CACHE_MAX_SIZE = 64
 DEVICE_MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}")
+WORKER_QR_PAYLOAD_START = "[WORKER_QR_LOGIN_URL]"
+WORKER_QR_PAYLOAD_END = "[/WORKER_QR_LOGIN_URL]"
+MAX_LOGIN_URL_LENGTH = 8192
+DEVICE_SYNC_ERROR_PREFIXES = (
+    "拉取云端设备列表超时",
+    "鉴权失效",
+    "SSL 通信异常",
+    "网络异常:",
+    "云端接口异常",
+    "系统级同步异常:",
+)
 
 
 class MiHomeClientError(Exception):
@@ -100,6 +112,8 @@ class MiHomeClient:
         self._login_status = LOGIN_IDLE
         self._login_process: Optional[asyncio.subprocess.Process] = None
         self._login_generation = 0
+        self._pending_login_state: Optional[Dict[str, Any]] = None
+        self._pending_login_state_baseline: Optional[Dict[str, Any]] = None
         self._prepared_device_cache = OrderedDict()
         self._worker_script = os.path.join(os.path.dirname(__file__), "_login_worker.py")
         self._spec_worker_script = os.path.join(
@@ -801,50 +815,59 @@ class MiHomeClient:
 
     def _extract_qr_url_from_buffer(self, buffer_text: str) -> str:
         """
-        从 stdout 缓冲区中提取二维码登录链接。
-        需要兼容：
-        1. URL 被拆成多行输出
-        2. URL 后面紧跟 DEBUG/INFO 日志
+        从登录沙盒的结构化 stdout 消息中提取真正的二维码载荷。
+
+        上游 ``loginUrl`` 是应编码进二维码的登录地址；``qr`` 只是已经
+        生成好的二维码图片地址。只接受 worker 明确标记的 ``loginUrl``，
+        避免再次把图片地址编码成二维码。
         """
         if not buffer_text:
             return ""
 
         compact = buffer_text.replace("\r", "").replace("\n", "")
-
         match = re.search(
-            r'(https://account\.xiaomi\.com/pass/qr/login\?[^\s\'"]+)',
+            re.escape(WORKER_QR_PAYLOAD_START)
+            + r"([A-Za-z0-9_-]{1,12288}={0,2})"
+            + re.escape(WORKER_QR_PAYLOAD_END),
             compact,
         )
         if not match:
             return ""
 
-        url = match.group(1).strip()
-
-        # 切掉可能拼接进来的日志尾巴
-        tail_markers = [
-            "DEBUG:",
-            "INFO:",
-            "[WORKER",
-            "urllib3.",
-            "Starting new HTTPS connection",
-            "HTTP/1.1",
-        ]
-        for marker in tail_markers:
-            pos = url.find(marker)
-            if pos > 0:
-                url = url[:pos].strip()
-
-        # 防御性裁剪，避免把一些明显非 URL 内容拼进去
-        weird_markers = [
-            "也可以访问链接查看二维码图片:",
-            "请使用米家APP扫描下方二维码",
-        ]
-        for marker in weird_markers:
-            pos = url.find(marker)
-            if pos > 0:
-                url = url[:pos].strip()
-
-        return url
+        try:
+            decoded = base64.urlsafe_b64decode(
+                match.group(1).encode("ascii")
+            ).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return ""
+        login_url = decoded.strip()
+        if (
+            not login_url
+            or len(login_url) > MAX_LOGIN_URL_LENGTH
+            or any(char in login_url for char in "\r\n\x00")
+        ):
+            return ""
+        try:
+            parsed = parse.urlparse(login_url)
+            hostname = (parsed.hostname or "").lower()
+            port = parsed.port
+        except ValueError:
+            return ""
+        if (
+            parsed.scheme.lower() != "https"
+            or not (
+                hostname == "account.xiaomi.com"
+                or hostname.endswith(".account.xiaomi.com")
+            )
+            or port not in (None, 443)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path != "/longPolling/login"
+            or not parsed.query
+            or parsed.fragment
+        ):
+            return ""
+        return login_url
 
     def _redact_login_output(self, text: str) -> str:
         """隐藏登录输出中的二维码链接和认证参数。"""
@@ -852,11 +875,15 @@ class MiHomeClient:
         raw = str(text or "")
         # 登录 URL 可能被子进程拆成多行。只要能从整体缓冲区恢复出它，
         # 就隐藏整段原始输出，避免任何续行查询参数绕过逐行正则。
-        if self._extract_qr_url_from_buffer(raw):
+        if (
+            WORKER_QR_PAYLOAD_START in raw
+            or self._extract_qr_url_from_buffer(raw)
+        ):
             sanitized = "[米家登录输出已隐藏]"
         else:
             sanitized = re.sub(
-                r"https://account\.xiaomi\.com/pass/qr/login\?[^\s]+",
+                r"https://(?:[A-Za-z0-9-]+\.)*account\.xiaomi\.com/"
+                r"(?:longPolling/login|pass/qr/login)\?[^\s]+",
                 "[米家登录链接已隐藏]",
                 raw,
                 flags=re.IGNORECASE,
@@ -869,17 +896,63 @@ class MiHomeClient:
             sanitized,
         )
 
+    def _clear_pending_login_state(self) -> None:
+        self._pending_login_state = None
+        self._pending_login_state_baseline = None
+
+    def _retry_pending_login_state(
+        self,
+        state: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], str, bool]:
+        pending = getattr(self, "_pending_login_state", None)
+        baseline = getattr(self, "_pending_login_state_baseline", None)
+        if not isinstance(pending, dict) or not isinstance(baseline, dict):
+            return state, "", False
+        if state != baseline:
+            self._clear_pending_login_state()
+            return state, "", False
+
+        target_state = dict(baseline)
+        target_state.update(pending)
+        result, observed_state = self.data_manager.compare_and_update_state(
+            baseline,
+            **pending,
+        )
+        if result == "saved":
+            self._clear_pending_login_state()
+            return observed_state, "", True
+        if result == "changed":
+            self._clear_pending_login_state()
+            return observed_state, "", observed_state == target_state
+
+        if observed_state not in (baseline, target_state):
+            self._clear_pending_login_state()
+            return observed_state, "", False
+        self._pending_login_state_baseline = observed_state
+        return (
+            observed_state,
+            "登录凭证已保存，但插件状态记录保存失败，请检查数据目录权限",
+            False,
+        )
+
     async def get_login_status(
         self,
         state: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if state is None:
             state = self.data_manager.load_state()
+        (
+            state,
+            credential_storage_error,
+            login_state_recovered,
+        ) = self._retry_pending_login_state(dict(state))
         return {
             "auth_exists": self.data_manager.auth_exists(),
             "login_in_progress": self._login_status != LOGIN_IDLE,
             "last_login_at": state.get("last_login_at", ""),
             "last_login_error": state.get("last_login_error", ""),
+            "credential_storage_error": credential_storage_error,
+            "login_state_recovered": login_state_recovered,
             "last_shared_error": state.get("last_shared_error", ""),
             "last_control_error": state.get("last_control_error", ""),
             "last_control_device": state.get("last_control_device", ""),
@@ -908,6 +981,7 @@ class MiHomeClient:
                 raise MiHomeClientError(
                     "本地登录凭证移除失败，请检查文件权限后重试"
                 )
+            self._clear_pending_login_state()
             previous_api = self.api
             self.api = None
             previous_session = getattr(previous_api, "session", None)
@@ -959,6 +1033,7 @@ class MiHomeClient:
         auth_existed_before = self.data_manager.auth_exists()
 
         logger.info(f"[MiHome] 启动登录沙盒进程 -> {self._worker_script}")
+        self._clear_pending_login_state()
         self._login_generation = getattr(self, "_login_generation", 0) + 1
         login_generation = self._login_generation
         self._login_status = LOGIN_RUNNING
@@ -999,9 +1074,9 @@ class MiHomeClient:
 
                     if not qr_found:
                         url = self._extract_qr_url_from_buffer(full_buffer)
-                        if url and "ticket=" in url and "dc=" in url and "sid=" in url:
+                        if url:
                             qr_found = True
-                            logger.info("[MiHome] 成功提取完整登录链接。")
+                            logger.info("[MiHome] 成功提取登录二维码载荷。")
                             callback_result = qr_callback(url)
                             if inspect.isawaitable(callback_result):
                                 await callback_result
@@ -1043,11 +1118,26 @@ class MiHomeClient:
                         )
                         self.data_manager.update_state(last_login_error=message)
                         return {"status": "error", "message": message}
-                    self.data_manager.update_state(
-                        last_login_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        last_login_error="",
+                    login_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    pending_state = {
+                        "last_login_at": login_at,
+                        "last_login_error": "",
+                    }
+                    state_saved = self.data_manager.update_state(
+                        **pending_state,
                     )
                     self._initialize_api()
+                    if state_saved is False:
+                        self._pending_login_state = pending_state
+                        self._pending_login_state_baseline = (
+                            self.data_manager.load_state()
+                        )
+                        message = (
+                            "登录凭证已保存，但插件状态记录保存失败，"
+                            "请检查数据目录权限"
+                        )
+                        return {"status": "error", "message": message}
+                    self._clear_pending_login_state()
                     return {"status": "success" if qr_found else "already_logged_in"}
                 else:
                     cleanup_ok = self._cleanup_new_login_auth(
@@ -1136,11 +1226,24 @@ class MiHomeClient:
                         did_to_name[did_str] = str(d.get("name", "未知设备")).strip() or "未知设备"
                         did_to_model[did_str] = str(d.get("model", "")).strip()
 
-                saved = self.data_manager.update_state(
+                state_updates = dict(
                     last_shared_error=shared_error,
                     did_to_name=did_to_name,
                     did_to_model=did_to_model,
                 )
+                previous_login_error = str(
+                    self.data_manager.load_state().get(
+                        "last_login_error",
+                        "",
+                    )
+                    or ""
+                ).strip()
+                if previous_login_error.startswith(
+                    DEVICE_SYNC_ERROR_PREFIXES
+                ):
+                    state_updates["last_login_error"] = ""
+
+                saved = self.data_manager.update_state(**state_updates)
                 if saved is False:
                     raise MiHomeClientError(
                         "设备缓存保存失败，请检查插件数据目录"
