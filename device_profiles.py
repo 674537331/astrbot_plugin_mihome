@@ -738,9 +738,7 @@ CATEGORY_PROFILES = {
             "wake-up",
             "play-radio",
             "play-text",
-            "execute-text-directive",
             "play-music",
-            "tv-switchon",
         ],
         "action_map": {
             "播放": "play",
@@ -751,9 +749,7 @@ CATEGORY_PROFILES = {
             "唤醒": "wake-up",
             "播放电台": "play-radio",
             "播放文本": "play-text",
-            "执行文本指令": "execute-text-directive",
             "播放音乐": "play-music",
-            "打开电视": "tv-switchon",
         },
         "help_examples": {
             "音量": ["50", "30", "80"],
@@ -1119,6 +1115,161 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
         "action_examples": [],
         "help_hints": {
             "温度": "支持 16~30°C",
+        },
+    },
+
+    "viomi.aircondition.y71": {
+        "category": CATEGORY_AC,
+        "hidden_props": [
+            "average_temperature",
+            "average_humidity",
+            "temp_unbalance",
+        ],
+        "prop_map": {
+            "开关": "on",
+            "模式": "mode",
+            "温度": "target_temperature",
+            "节能": "eco",
+            "睡眠": "sleep_mode",
+            "风速": "fan_level",
+            "左右扫风": "horizontal_swing",
+            "上下扫风": "vertical_swing",
+            "左右风向": "horizontal_angle",
+            "上下风向": "vertical_angle",
+            "指示灯": "indicator_light_on",
+            "提示音": "audio_mode",
+            "AI智能": "ai_mode",
+            "自清洁": "auto_clean",
+            "除菌": "deodorize",
+            "全域风": "global_wind",
+        },
+        "value_map": {
+            "开": True,
+            "关": False,
+        },
+        "property_value_map": {
+            "mode": {
+                "自动模式": 1,
+                "制冷": 2,
+                "除湿": 3,
+                "送风": 4,
+                "制热": 5,
+            },
+            "fan_level": {
+                "自动风": 0,
+                "静音": 1,
+                "低速": 2,
+                "中速": 3,
+                "高速": 4,
+                "超强": 5,
+            },
+        },
+        "display_map": {
+            "on": "开关状态",
+            "mode": "运行模式",
+            "fault": "故障信息",
+            "target_temperature": "设定温度",
+            "eco": "节能模式",
+            "sleep_mode": "睡眠模式",
+            "fan_level": "风速档位",
+            "horizontal_swing": "左右扫风状态",
+            "vertical_swing": "上下扫风状态",
+            "horizontal_angle": "左右风向",
+            "vertical_angle": "上下风向",
+            "temperature": "当前温度",
+            "relative_humidity": "当前湿度",
+            "indicator_light_on": "指示灯状态",
+            "audio_mode": "提示音状态",
+            "ai_mode": "AI 智能模式",
+            "auto_clean": "自清洁状态",
+            "autoclean_worktime": "自清洁工作时长",
+            "deodorize": "除菌状态",
+            "deodorize_worktime": "除菌工作时长",
+            "global_wind": "全域风状态",
+            "actual_mode": "实际运行模式",
+        },
+        "value_display_map": {
+            "mode": {
+                1: "自动",
+                2: "制冷",
+                3: "除湿",
+                4: "送风",
+                5: "制热",
+            },
+            "fan_level": {
+                0: "自动风",
+                1: "静音",
+                2: "低速",
+                3: "中速",
+                4: "高速",
+                5: "超强",
+            },
+            "actual_mode": {
+                2: "制冷",
+                3: "除湿",
+                4: "送风",
+                5: "制热",
+            },
+        },
+        "detail_writable": [
+            "on",
+            "mode",
+            "target_temperature",
+            "eco",
+            "sleep_mode",
+            "fan_level",
+            "horizontal_swing",
+            "vertical_swing",
+            "horizontal_angle",
+            "vertical_angle",
+            "indicator_light_on",
+            "audio_mode",
+            "ai_mode",
+            "auto_clean",
+            "deodorize",
+            "global_wind",
+        ],
+        "detail_readable": [
+            "on",
+            "mode",
+            "fault",
+            "target_temperature",
+            "eco",
+            "sleep_mode",
+            "fan_level",
+            "horizontal_swing",
+            "vertical_swing",
+            "horizontal_angle",
+            "vertical_angle",
+            "temperature",
+            "relative_humidity",
+            "indicator_light_on",
+            "audio_mode",
+            "ai_mode",
+            "auto_clean",
+            "autoclean_worktime",
+            "deodorize",
+            "deodorize_worktime",
+            "global_wind",
+            "actual_mode",
+        ],
+        "action_map": {},
+        "detail_actions": [],
+        "help_examples": {
+            "开关": ["开", "关"],
+            "模式": ["自动模式", "制冷", "除湿", "送风", "制热"],
+            "温度": ["26", "24.5"],
+            "风速": ["自动风", "静音", "低速", "中速", "高速", "超强"],
+            "节能": ["开", "关"],
+            "睡眠": ["开", "关"],
+            "左右扫风": ["开", "关"],
+            "上下扫风": ["开", "关"],
+        },
+        "action_examples": [],
+        "help_hints": {
+            "温度": "支持 16~31°C，步进 0.5°C",
+            "左右风向": "支持 0~9",
+            "上下风向": "支持 0~9",
         },
     },
 
@@ -1944,9 +2095,7 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
             "wake-up",
             "play-radio",
             "play-text",
-            "execute-text-directive",
             "play-music",
-            "tv-switchon",
         ],
         "action_map": {
             "播放": "play",
@@ -1957,9 +2106,7 @@ MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
             "唤醒": "wake-up",
             "播放电台": "play-radio",
             "播放文本": "play-text",
-            "执行文本指令": "execute-text-directive",
             "播放音乐": "play-music",
-            "打开电视": "tv-switchon",
         },
         "help_examples": {
             "音量": ["50", "30", "80"],
@@ -2036,6 +2183,19 @@ def get_device_prop_map(model: str = "", category: str = "") -> Dict[str, str]:
 def get_device_val_map(model: str = "", category: str = "") -> Dict[str, Any]:
     profile = resolve_profile(model=model, category=category)
     return {**GLOBAL_VAL_MAP, **profile.get("value_map", {})}
+
+
+def get_device_property_value_map(
+    model: str = "",
+    category: str = "",
+    property_key: str = "",
+) -> Dict[str, Any]:
+    profile = resolve_profile(model=model, category=category)
+    property_maps = profile.get("property_value_map", {})
+    if not isinstance(property_maps, dict):
+        return {}
+    value_map = property_maps.get(str(property_key or ""), {})
+    return dict(value_map) if isinstance(value_map, dict) else {}
 
 
 def get_device_display_map(model: str = "", category: str = "") -> Dict[str, str]:

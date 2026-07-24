@@ -161,6 +161,12 @@ class WebAPIBehaviorTests(unittest.TestCase):
 
         self.web.request.json = read_json
 
+    def mapping_revision(self, api):
+        return api._config_revision(self.web._MAPPING_REVISION_KEYS)
+
+    def tool_revision(self, api):
+        return api._config_revision(self.web._TOOL_REVISION_KEYS)
+
     def test_route_surface_is_management_only(self):
         api, _plugin = self.build_api()
         registered = []
@@ -237,6 +243,7 @@ class WebAPIBehaviorTests(unittest.TestCase):
                 }
             ],
             "confirm": True,
+            "revision": self.mapping_revision(api),
         }
         self.set_request_payload(payload)
         response = asyncio.run(api.save_device_mappings())
@@ -264,6 +271,7 @@ class WebAPIBehaviorTests(unittest.TestCase):
                     }
                 ],
                 "confirm": True,
+                "revision": self.mapping_revision(api),
             }
         )
         with self.assertRaises(self.web.WebAPIError):
@@ -271,12 +279,88 @@ class WebAPIBehaviorTests(unittest.TestCase):
         self.assertEqual(dict(plugin.config), original)
         self.assertEqual(plugin.config.save_count, 0)
 
+    def test_mapping_rebind_fails_closed_for_control_allowlist(self):
+        api, plugin = self.build_api(
+            {
+                "device_map": '{"客厅灯": "old-did"}',
+                "device_category_map": '{"客厅灯": "开关类别"}',
+                "control_tool": {
+                    "enable": True,
+                    "admin_only": True,
+                    "allowed_devices": ["客厅灯"],
+                },
+            }
+        )
+        self.set_request_payload(
+            {
+                "mappings": [
+                    {
+                        "alias": "客厅灯",
+                        "did": "new-did",
+                        "category": "开关类别",
+                    }
+                ],
+                "confirm": True,
+                "revision": self.mapping_revision(api),
+            }
+        )
+
+        response = asyncio.run(api.save_device_mappings())
+
+        self.assertTrue(response["payload"]["saved"])
+        self.assertEqual(
+            response["payload"]["changes"]["control_allowlist_removed"],
+            ["客厅灯"],
+        )
+        self.assertEqual(
+            plugin.config["control_tool"]["allowed_devices"],
+            [],
+        )
+        self.assertEqual(
+            response["payload"]["tool_revision"],
+            self.tool_revision(api),
+        )
+
+    def test_mapping_preview_rejects_stale_native_config_revision(self):
+        api, plugin = self.build_api(
+            {
+                "device_map": '{"客厅灯": "old-did"}',
+                "device_category_map": '{"客厅灯": "开关类别"}',
+            }
+        )
+        stale_revision = self.mapping_revision(api)
+        plugin.config["device_map"] = '{"卧室灯": "new-did"}'
+        self.set_request_payload(
+            {
+                "mappings": [
+                    {
+                        "alias": "客厅灯",
+                        "did": "old-did",
+                        "category": "开关类别",
+                    }
+                ],
+                "revision": stale_revision,
+            }
+        )
+
+        with self.assertRaises(self.web.WebAPIError) as raised:
+            asyncio.run(api.save_device_mappings())
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("插件设置", raised.exception.message)
+        self.assertEqual(plugin.config.save_count, 0)
+
     def test_sensitive_login_values_are_redacted(self):
         redacted = self.web._redact_text(
-            "https://account.xiaomi.com/a?ticket=abc serviceToken=secret-value"
+            "https://account.xiaomi.com/a?ticket=abc "
+            "serviceToken=secret-value psecurity=p-secret "
+            "nonce=nonce-secret pass_o=pass-secret"
         )
         self.assertNotIn("abc", redacted)
         self.assertNotIn("secret-value", redacted)
+        self.assertNotIn("p-secret", redacted)
+        self.assertNotIn("nonce-secret", redacted)
+        self.assertNotIn("pass-secret", redacted)
         self.assertIn("已隐藏", redacted)
 
     def test_login_payload_hides_raw_url_and_blocks_parallel_operations(self):
@@ -337,6 +421,40 @@ class WebAPIBehaviorTests(unittest.TestCase):
         self.assertEqual(redacted, "[米家登录输出已隐藏]")
         self.assertNotIn("secret-ticket", redacted)
 
+    def test_logout_clears_account_snapshot_and_preserves_mappings(self):
+        api, plugin = self.build_api(
+            {
+                "device_map": '{"旧账号设备": "123"}',
+                "device_category_map": '{"旧账号设备": "开关类别"}',
+            }
+        )
+
+        class LogoutClient:
+            async def logout(self):
+                return True
+
+            async def get_login_status(self):
+                return {"auth_exists": False}
+
+        plugin.client = LogoutClient()
+        api._device_snapshot = [
+            {
+                "did": "123",
+                "name": "旧账号设备",
+                "model": "old.model",
+            }
+        ]
+        api._device_snapshot_at = "2026-07-24 12:00:00"
+        self.set_request_payload({"confirm": "退出登录"})
+
+        response = asyncio.run(api.logout())
+
+        self.assertTrue(response["payload"]["credential_removed"])
+        self.assertEqual(api._device_snapshot, [])
+        self.assertEqual(api._device_snapshot_at, "")
+        self.assertIn("旧账号设备", plugin.config["device_map"])
+        self.assertIn("旧账号设备", plugin.config["device_category_map"])
+
     def test_control_tool_requires_confirmation_and_valid_allowlist(self):
         api, plugin = self.build_api(
             {
@@ -352,6 +470,7 @@ class WebAPIBehaviorTests(unittest.TestCase):
                 "admin_only": True,
                 "allowed_devices": ["客厅灯"],
             },
+            "revision": self.tool_revision(api),
         }
         self.set_request_payload(payload)
         with self.assertRaises(self.web.WebAPIError) as raised:
@@ -385,11 +504,40 @@ class WebAPIBehaviorTests(unittest.TestCase):
                     "allowed_devices": ["不存在的别名"],
                 },
                 "confirm_control_tool": True,
+                "revision": self.tool_revision(api),
             }
         )
         with self.assertRaises(self.web.WebAPIError):
             asyncio.run(api.save_tool_settings())
         self.assertNotIn("control_tool", plugin.config)
+
+    def test_disabled_control_tool_drops_stale_allowlist_alias(self):
+        api, plugin = self.build_api(
+            {
+                "device_map": '{"客厅灯": "123"}',
+                "device_category_map": '{"客厅灯": "开关类别"}',
+            }
+        )
+        self.set_request_payload(
+            {
+                "enable_readonly_tool": False,
+                "scene_tool": {"enable": False, "admin_only": True},
+                "control_tool": {
+                    "enable": False,
+                    "admin_only": True,
+                    "allowed_devices": ["旧设备"],
+                },
+                "revision": self.tool_revision(api),
+            }
+        )
+
+        response = asyncio.run(api.save_tool_settings())
+
+        self.assertTrue(response["payload"]["saved"])
+        self.assertEqual(
+            plugin.config["control_tool"]["allowed_devices"],
+            [],
+        )
 
     def test_scene_tool_settings_share_native_plugin_config(self):
         api, plugin = self.build_api(
@@ -410,6 +558,7 @@ class WebAPIBehaviorTests(unittest.TestCase):
                     "allowed_devices": [],
                 },
                 "confirm_public_scene_tool": True,
+                "revision": self.tool_revision(api),
             }
         )
 
@@ -423,6 +572,10 @@ class WebAPIBehaviorTests(unittest.TestCase):
         self.assertTrue(plugin.config["enable_scene_tool"])
         self.assertFalse(plugin.config["scene_tool_admin_only"])
         self.assertEqual(plugin.config.save_count, 1)
+        self.assertEqual(
+            response["payload"]["mapping_revision"],
+            self.mapping_revision(api),
+        )
 
         # 模拟原生“插件设置”写入当前 AstrBotConfig。
         plugin.config["scene_tool"] = {"enable": False, "admin_only": True}
@@ -437,6 +590,36 @@ class WebAPIBehaviorTests(unittest.TestCase):
             reloaded_api._tool_settings()["scene_tool"],
             {"enable": False, "admin_only": True},
         )
+
+    def test_tool_save_rejects_stale_native_config_revision(self):
+        api, plugin = self.build_api(
+            {
+                "scene_tool": {"enable": False, "admin_only": True},
+                "enable_readonly_tool": False,
+            }
+        )
+        response = asyncio.run(api.get_tool_settings())
+        stale_revision = response["payload"]["revision"]
+        plugin.config["scene_tool"] = {"enable": True, "admin_only": True}
+        self.set_request_payload(
+            {
+                "enable_readonly_tool": True,
+                "scene_tool": {"enable": False, "admin_only": True},
+                "control_tool": {
+                    "enable": False,
+                    "admin_only": True,
+                    "allowed_devices": [],
+                },
+                "revision": stale_revision,
+            }
+        )
+
+        with self.assertRaises(self.web.WebAPIError) as raised:
+            asyncio.run(api.save_tool_settings())
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("插件设置", raised.exception.message)
+        self.assertEqual(plugin.config.save_count, 0)
 
     def test_tool_settings_roll_back_exactly_when_persistence_fails(self):
         original = {
@@ -455,6 +638,7 @@ class WebAPIBehaviorTests(unittest.TestCase):
                     "allowed_devices": ["客厅灯"],
                 },
                 "confirm_control_tool": True,
+                "revision": self.tool_revision(api),
             }
         )
         with self.assertRaises(RuntimeError):
@@ -489,7 +673,14 @@ class WebUIStaticContractTests(unittest.TestCase):
         )
         self.assertIn(".save-dock { display: none !important; }", style)
         self.assertIn("state.tools = normalizeTools(saved)", script)
-        self.assertIn('badge.textContent = dirty ? "有未保存修改" : "已保存"', script)
+        self.assertIn('"有未保存修改"', script)
+        self.assertIn('"等待读取"', script)
+        self.assertIn("await awaitAll([", script)
+        self.assertIn("setMappingEditingDisabled(true)", script)
+        self.assertIn("setToolEditingDisabled(true)", script)
+        self.assertIn("state.configGeneration += 1", script)
+        self.assertIn("state.deviceLoading = true", script)
+        self.assertIn("state.toolLoading = true", script)
         for forbidden in (
             "fetch(",
             "window.confirm",
@@ -509,8 +700,27 @@ class WebUIStaticContractTests(unittest.TestCase):
         self.assertIn("confirm_control_tool", script)
         self.assertIn("confirm_public_control_tool", script)
         self.assertIn("data-control-alias", script)
+        self.assertIn("revision: baseRevision", script)
+        self.assertIn("revision: previewRevision", script)
+        self.assertIn("state.loaded.tools", script)
+        self.assertIn("saved && saved.mapping_revision", script)
+        self.assertIn("Tool 设置有未保存修改", script)
+        self.assertIn("设备映射有未保存修改", script)
         self.assertIn("root.text", script)
         self.assertNotIn("蒸烤锅类别", script)
+
+    def test_frontend_does_not_overstate_credential_validity(self):
+        script = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertIn("credential_present", script)
+        self.assertNotIn("授权有效", script)
+        self.assertNotIn("登录凭证当前可用", script)
+        self.assertNotIn("服务正常", script)
+
+        html = (PAGE_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn("页面不含", html)
+
+        style = (PAGE_DIR / "style.css").read_text(encoding="utf-8")
+        self.assertIn("#0d7650", style.lower())
 
     def test_qr_is_generated_locally_and_never_sent_to_third_party(self):
         backend = WEB_API_PATH.read_text(encoding="utf-8")

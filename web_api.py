@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import inspect
 import json
 import re
@@ -71,11 +73,28 @@ CATEGORY_OPTIONS = (
     CATEGORY_GAS_SENSOR,
 )
 
+_MAPPING_REVISION_KEYS = (
+    "device_map",
+    "device_category_map",
+    "control_tool",
+)
+_TOOL_REVISION_KEYS = (
+    "scene_tool",
+    "control_tool",
+    "enable_readonly_tool",
+    "enable_scene_tool",
+    "scene_tool_admin_only",
+    "device_map",
+    "device_category_map",
+)
+
 _DID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_REVISION_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 _URL_PATTERN = re.compile(r"https?://[^\s]+", flags=re.IGNORECASE)
 _SECRET_PATTERN = re.compile(
-    r"(?i)(ticket|serviceToken|passToken|ssecurity|deviceId|userId|cookie|token)"
+    r"(?i)(ticket|serviceToken|passToken|ssecurity|psecurity|nonce|pass_o|"
+    r"deviceId|userId|cookie|token|ua)"
     r"([\"']?\s*[:=]\s*[\"']?)([^,\s\"'&}]+)"
 )
 
@@ -215,6 +234,56 @@ class MiHomeWebAPI:
         self._device_snapshot: list[dict[str, Any]] = []
         self._device_snapshot_at = ""
 
+    def _clear_account_runtime_state(self) -> None:
+        self._device_snapshot = []
+        self._device_snapshot_at = ""
+        self._login_task = None
+        self._login_qr_url = ""
+        self._login_qr_image = ""
+        self._login_qr_created_at = 0.0
+        self._login_started_at = ""
+        self._login_result = {
+            "status": "idle",
+            "message": "已退出米家账号。",
+        }
+
+    async def _finish_account_runtime_reset(
+        self,
+        login_task: asyncio.Task | None,
+    ) -> None:
+        if (
+            login_task is not None
+            and login_task is not asyncio.current_task()
+            and not login_task.done()
+        ):
+            login_task.cancel()
+            try:
+                await login_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug(
+                    "[MiHome WebUI] 登出时回收登录任务异常: %s",
+                    type(exc).__name__,
+                )
+        self._clear_account_runtime_state()
+
+    async def logout_account(self) -> bool:
+        """供聊天命令与管理页共用的账号登出协调器。"""
+
+        async with self._login_start_lock:
+            async with self._operation_lock:
+                login_task = self._login_task
+                try:
+                    removed = await self._client.logout()
+                except MiHomeClientError:
+                    client_status = await self._client.get_login_status()
+                    if not client_status.get("auth_exists"):
+                        await self._finish_account_runtime_reset(login_task)
+                    raise
+                await self._finish_account_runtime_reset(login_task)
+                return bool(removed)
+
     # ------------------------------------------------------------------
     # 路由注册
     # ------------------------------------------------------------------
@@ -342,6 +411,40 @@ class MiHomeWebAPI:
         result = saver()
         if inspect.isawaitable(result):
             await result
+
+    def _config_revision(self, keys: tuple[str, ...]) -> str:
+        """为 WebUI 管理的配置生成稳定版本，用于阻止陈旧页面覆盖新设置。"""
+
+        snapshot = {
+            key: (
+                {"present": True, "value": deepcopy(self._config[key])}
+                if key in self._config
+                else {"present": False}
+            )
+            for key in keys
+        }
+        encoded = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _expected_revision(self, data: dict[str, Any]) -> str:
+        revision = data.get("revision")
+        if not isinstance(revision, str) or not _REVISION_PATTERN.fullmatch(revision):
+            raise WebAPIError("配置版本无效，请刷新页面后重试。", 409)
+        return revision
+
+    def _ensure_revision(self, expected: str, keys: tuple[str, ...]) -> None:
+        current = self._config_revision(keys)
+        if not hmac.compare_digest(expected, current):
+            raise WebAPIError(
+                "配置已由 AstrBot 插件设置或其他管理页面更新，请刷新后重试。",
+                409,
+            )
 
     def _ensure_operation_available(
         self,
@@ -602,6 +705,8 @@ class MiHomeWebAPI:
 
     async def get_status(self):
         login = await self._client.get_login_status()
+        credential_present = bool(login.get("auth_exists"))
+        login_error = _redact_text(login.get("last_login_error"))
         rows = self._cached_device_rows()
         scenes = self._sanitized_scenes()
         device_map, _category_map, mapping_errors = self._mapping_snapshot()
@@ -615,7 +720,15 @@ class MiHomeWebAPI:
             {
                 "ok": True,
                 "auth": {
-                    "logged_in": bool(login.get("auth_exists")),
+                    "credential_present": credential_present,
+                    "credential_state": (
+                        "attention"
+                        if credential_present and login_error
+                        else "present"
+                        if credential_present
+                        else "missing"
+                    ),
+                    "logged_in": credential_present,
                     "login_in_progress": bool(
                         login.get("login_in_progress")
                         or (
@@ -623,7 +736,7 @@ class MiHomeWebAPI:
                         )
                     ),
                     "last_login_at": str(login.get("last_login_at") or ""),
-                    "last_login_error": _redact_text(login.get("last_login_error")),
+                    "last_login_error": login_error,
                 },
                 "summary": {
                     "cloud_device_count": sum(
@@ -758,13 +871,23 @@ class MiHomeWebAPI:
 
     async def get_auth_status(self):
         login = await self._client.get_login_status()
+        credential_present = bool(login.get("auth_exists"))
+        login_error = _redact_text(login.get("last_login_error"))
         return _sensitive_json_response(
             {
                 "ok": True,
                 **self._login_status_payload(),
-                "logged_in": bool(login.get("auth_exists")),
+                "credential_present": credential_present,
+                "credential_state": (
+                    "attention"
+                    if credential_present and login_error
+                    else "present"
+                    if credential_present
+                    else "missing"
+                ),
+                "logged_in": credential_present,
                 "last_login_at": str(login.get("last_login_at") or ""),
-                "last_login_error": _redact_text(login.get("last_login_error")),
+                "last_login_error": login_error,
             }
         )
 
@@ -772,31 +895,8 @@ class MiHomeWebAPI:
         data = await self._read_json_body()
         if data.get("confirm") != "退出登录":
             raise WebAPIError('请发送 confirm="退出登录" 以确认清除凭证。')
-        async with self._login_start_lock:
-            self._ensure_operation_available(allow_login_task=True)
-            async with self._operation_lock:
-                login_task = self._login_task
-                removed = await self._client.logout()
-                if login_task is not None and not login_task.done():
-                    login_task.cancel()
-                    try:
-                        await login_task
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception as exc:
-                        logger.debug(
-                            "[MiHome WebUI] 登出时回收登录任务异常: %s",
-                            exc,
-                        )
-                self._login_task = None
-                self._login_qr_url = ""
-                self._login_qr_image = ""
-                self._login_qr_created_at = 0.0
-                self._login_started_at = ""
-                self._login_result = {
-                    "status": "idle",
-                    "message": "已退出米家账号。",
-                }
+        self._ensure_operation_available(allow_login_task=True)
+        removed = await self.logout_account()
         return json_response(
             {
                 "ok": True,
@@ -832,6 +932,7 @@ class MiHomeWebAPI:
                 "categories": list(CATEGORY_OPTIONS),
                 "snapshot_at": self._device_snapshot_at,
                 "mapping_errors": mapping_errors,
+                "revision": self._config_revision(_MAPPING_REVISION_KEYS),
             }
         )
 
@@ -850,6 +951,7 @@ class MiHomeWebAPI:
                 "ok": True,
                 "devices": rows,
                 "synced_at": self._device_snapshot_at,
+                "revision": self._config_revision(_MAPPING_REVISION_KEYS),
                 "message": f"已同步 {len(rows)} 台设备。",
             }
         )
@@ -1024,6 +1126,9 @@ class MiHomeWebAPI:
 
     async def save_device_mappings(self):
         data = await self._read_json_body()
+        expected_revision = self._expected_revision(data)
+        self._ensure_operation_available()
+        self._ensure_revision(expected_revision, _MAPPING_REVISION_KEYS)
         new_device_map, new_category_map = self._parse_mapping_rows(data)
         old_device_map, old_category_map, _ = self._mapping_snapshot()
 
@@ -1062,6 +1167,18 @@ class MiHomeWebAPI:
             persisted_category_map,
         )
         summary["preserved_orphan_categories"] = sorted(preserved_orphan_categories)
+        current_control = self._tool_settings()["control_tool"]
+        allowed_aliases = set(current_control["allowed_devices"])
+        removed_aliases = set(old_device_map) - set(new_device_map)
+        rebound_aliases = {
+            alias
+            for alias in set(old_device_map) & set(new_device_map)
+            if old_device_map[alias] != new_device_map[alias]
+        }
+        control_allowlist_removed = sorted(
+            allowed_aliases & (removed_aliases | rebound_aliases)
+        )
+        summary["control_allowlist_removed"] = control_allowlist_removed
         if data.get("confirm") is not True:
             return json_response(
                 {
@@ -1069,13 +1186,18 @@ class MiHomeWebAPI:
                     "saved": False,
                     "requires_confirmation": True,
                     "changes": summary,
+                    "revision": self._config_revision(_MAPPING_REVISION_KEYS),
                 }
             )
 
-        self._ensure_operation_available()
         async with self._operation_lock:
+            self._ensure_revision(expected_revision, _MAPPING_REVISION_KEYS)
             old_device_raw = self._config.get("device_map", "{}")
             old_category_raw = self._config.get("device_category_map", "{}")
+            had_control_config = "control_tool" in self._config
+            old_control_config = deepcopy(
+                self._config.get("control_tool", {})
+            )
             self._config["device_map"] = json.dumps(
                 new_device_map,
                 ensure_ascii=False,
@@ -1086,11 +1208,24 @@ class MiHomeWebAPI:
                 ensure_ascii=False,
                 indent=2,
             )
+            if control_allowlist_removed:
+                self._config["control_tool"] = {
+                    **current_control,
+                    "allowed_devices": [
+                        alias
+                        for alias in current_control["allowed_devices"]
+                        if alias not in control_allowlist_removed
+                    ],
+                }
             try:
                 await self._persist_config()
             except Exception:
                 self._config["device_map"] = old_device_raw
                 self._config["device_category_map"] = old_category_raw
+                if had_control_config:
+                    self._config["control_tool"] = old_control_config
+                else:
+                    self._config.pop("control_tool", None)
                 raise
 
         return json_response(
@@ -1098,6 +1233,9 @@ class MiHomeWebAPI:
                 "ok": True,
                 "saved": True,
                 "changes": summary,
+                "control_tool": self._tool_settings()["control_tool"],
+                "revision": self._config_revision(_MAPPING_REVISION_KEYS),
+                "tool_revision": self._config_revision(_TOOL_REVISION_KEYS),
                 "message": "设备别名与类别映射已保存。",
             }
         )
@@ -1123,7 +1261,8 @@ class MiHomeWebAPI:
         )
         if not callable(renderer):
             raise WebAPIError("当前插件版本不支持只读设备状态。", 501)
-        text = await renderer(alias)
+        async with self._operation_lock:
+            text = await renderer(alias)
         return json_response(
             {
                 "ok": True,
@@ -1171,10 +1310,17 @@ class MiHomeWebAPI:
     # ------------------------------------------------------------------
 
     async def get_tool_settings(self):
-        return json_response({"ok": True, **self._tool_settings()})
+        return json_response(
+            {
+                "ok": True,
+                **self._tool_settings(),
+                "revision": self._config_revision(_TOOL_REVISION_KEYS),
+            }
+        )
 
     async def save_tool_settings(self):
         data = await self._read_json_body()
+        expected_revision = self._expected_revision(data)
         supported_fields = {
             "enable_readonly_tool",
             "scene_tool",
@@ -1182,6 +1328,7 @@ class MiHomeWebAPI:
             "confirm_public_scene_tool",
             "confirm_control_tool",
             "confirm_public_control_tool",
+            "revision",
         }
         if set(data) - supported_fields:
             raise WebAPIError("Tool 设置包含不支持的字段。")
@@ -1219,6 +1366,8 @@ class MiHomeWebAPI:
         normalized_allowed = []
         for index, value in enumerate(allowed_devices, 1):
             if not isinstance(value, str):
+                if not control["enable"]:
+                    continue
                 raise WebAPIError(f"设备白名单第 {index} 项必须是字符串。")
             alias = value.strip()
             if (
@@ -1226,8 +1375,12 @@ class MiHomeWebAPI:
                 or len(alias) > MAX_ALIAS_LENGTH
                 or _CONTROL_CHAR_PATTERN.search(alias)
             ):
+                if not control["enable"]:
+                    continue
                 raise WebAPIError(f"设备白名单第 {index} 项不是有效别名。")
             if alias not in device_map:
+                if not control["enable"]:
+                    continue
                 raise WebAPIError(f"设备白名单别名“{alias}”不在 device_map 中。")
             if alias not in normalized_allowed:
                 normalized_allowed.append(alias)
@@ -1295,6 +1448,7 @@ class MiHomeWebAPI:
 
         self._ensure_operation_available()
         async with self._operation_lock:
+            self._ensure_revision(expected_revision, _TOOL_REVISION_KEYS)
             self._config["scene_tool"] = new_scene
             self._config["control_tool"] = new_control
             self._config["enable_readonly_tool"] = data["enable_readonly_tool"]
@@ -1317,6 +1471,8 @@ class MiHomeWebAPI:
                 "saved": True,
                 "changes": changes,
                 **self._tool_settings(),
+                "revision": self._config_revision(_TOOL_REVISION_KEYS),
+                "mapping_revision": self._config_revision(_MAPPING_REVISION_KEYS),
             }
         )
 
@@ -1340,7 +1496,14 @@ class MiHomeWebAPI:
                 }
             )
 
-        if login.get("auth_exists"):
+        if login.get("auth_exists") and login.get("last_login_error"):
+            add(
+                "auth",
+                "warning",
+                "登录凭证",
+                "已检测到米家登录凭证，但近期存在登录或连接异常。",
+            )
+        elif login.get("auth_exists"):
             add("auth", "success", "登录凭证", "已检测到米家登录凭证。")
         else:
             add(

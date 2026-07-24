@@ -246,7 +246,7 @@ svg { display: block; fill: currentColor; }
   border-radius: 26px;
   background:
     radial-gradient(circle at 92% 10%, rgba(255,255,255,.2), transparent 15rem),
-    linear-gradient(125deg, #34b987, #12875d 60%, #0a6b48);
+    linear-gradient(125deg, #0d7650, #12875d 60%, #0a6b48);
   color: #fff;
   box-shadow: 0 22px 50px rgba(18, 135, 93, .18);
 }

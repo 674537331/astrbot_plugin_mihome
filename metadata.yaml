@@ -6,9 +6,5 @@ help: |
   发送 /米家帮助 查看完整指令总览；发送 /米家帮助 [设备别名] 查看设备专属控制示例。
 version: v8.0.1
 astrbot_version: ">=4.24.2"
-support_platforms:
-  - aiocqhttp
-  - qq_official
-  - gewechat
 author: RyanVaderAn
 repo: https://github.com/674537331/astrbot_plugin_mihome
