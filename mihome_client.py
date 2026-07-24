@@ -3,11 +3,18 @@ import re
 import os
 import sys
 import asyncio
+import math
+import logging
 from datetime import datetime
 from typing import Dict, Callable, Awaitable, Union, Any, Optional, List
 
 from astrbot.api import logger
-from mijiaAPI import (
+
+# mijiaAPI 4.1.3 的 DEBUG 日志会输出请求体与认证数据。必须在导入并创建
+# 任何上游实例前抑制，避免 DID、动作文本及登录令牌进入 AstrBot 日志。
+logging.getLogger("mijiaAPI").setLevel(logging.WARNING)
+
+from mijiaAPI import (  # noqa: E402 - security guard must run before import
     mijiaAPI,
     mijiaDevice,
     LoginError,
@@ -27,7 +34,7 @@ except ImportError:
     class SSLError(Exception):
         pass
 
-from .data_manager import MiHomeDataManager
+from .data_manager import MiHomeDataManager  # noqa: E402
 
 LOGIN_IDLE = "idle"
 LOGIN_RUNNING = "running"
@@ -69,6 +76,144 @@ class MiHomeClient:
     def _normalize_key(self, key: str) -> str:
         return str(key).strip().lower().replace("-", "_")
 
+    @staticmethod
+    def _parse_rw_field(rw: Any) -> tuple[bool, bool]:
+        """兼容 mijiaAPI 不同版本的读写权限表示。"""
+
+        if isinstance(rw, str):
+            token = rw.strip().lower()
+            if token in {"r", "read"}:
+                return True, False
+            if token in {"w", "write"}:
+                return False, True
+            if token in {"rw", "wr", "readwrite", "read_write", "read-write"}:
+                return True, True
+            return False, False
+
+        if isinstance(rw, (list, tuple, set)):
+            tokens = {str(item).strip().lower() for item in rw}
+            readable = bool(tokens & {"r", "read"})
+            writable = bool(tokens & {"w", "write"})
+            return readable, writable
+
+        return False, False
+
+    @staticmethod
+    def _validate_action_response(response: Any) -> bool:
+        """校验动作结果；返回 False 表示网关已接收但结果无法确认。"""
+
+        confirmed = True
+        saw_code = False
+        candidates: List[Any] = [response]
+        if isinstance(response, dict):
+            nested = response.get("result")
+            if isinstance(nested, list):
+                candidates.extend(nested)
+            elif isinstance(nested, dict):
+                candidates.append(nested)
+        elif isinstance(response, list):
+            candidates.extend(response)
+
+        for item in candidates:
+            if not isinstance(item, dict) or "code" not in item:
+                continue
+            try:
+                code = int(item["code"])
+            except (TypeError, ValueError):
+                continue
+            saw_code = True
+            if code == 1:
+                confirmed = False
+            elif code != 0:
+                raise MiHomeControlError(f"cloud_rejected:{code}")
+        return confirmed if saw_code else False
+
+    def _build_property_method(
+        self,
+        device: Any,
+        did: str,
+        prop: str,
+        value: Any,
+    ) -> Dict[str, Any]:
+        """按 mijiaAPI 4.1.3 的 DevProp 规则校验并构造属性请求。"""
+
+        prop_list = getattr(device, "prop_list", {})
+        if not isinstance(prop_list, dict) or prop not in prop_list:
+            raise ValueError("属性不在设备运行时规格中")
+        prop_info = prop_list[prop]
+        _readable, writable = self._parse_rw_field(
+            getattr(prop_info, "rw", None)
+        )
+        if not writable:
+            raise ValueError("属性不可写")
+
+        value_type = str(getattr(prop_info, "type", "") or "").lower()
+        if value_type == "bool":
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"true", "1"}:
+                    value = True
+                elif lowered in {"false", "0"}:
+                    value = False
+                else:
+                    raise ValueError("布尔值格式无效")
+            elif isinstance(value, int) and not isinstance(value, bool):
+                if value not in {0, 1}:
+                    raise ValueError("布尔值格式无效")
+                value = bool(value)
+            elif not isinstance(value, bool):
+                raise ValueError("布尔值格式无效")
+        elif value_type in {"int", "uint"}:
+            if isinstance(value, bool):
+                raise ValueError("整数属性不能使用布尔值")
+            value = int(value)
+            if value_type == "uint" and value < 0:
+                raise ValueError("无符号整数不能为负数")
+        elif value_type == "float":
+            if isinstance(value, bool):
+                raise ValueError("浮点属性不能使用布尔值")
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("浮点属性必须是有限数值")
+        elif value_type == "string":
+            if not isinstance(value, str):
+                raise ValueError("字符串属性必须使用字符串值")
+        else:
+            raise ValueError("设备规格包含不支持的属性类型")
+
+        range_info = getattr(prop_info, "range", None) or []
+        if value_type in {"int", "uint", "float"} and len(range_info) >= 2:
+            minimum, maximum = range_info[0], range_info[1]
+            if value < minimum or value > maximum:
+                raise ValueError("属性值超出设备规格范围")
+            if len(range_info) >= 3 and range_info[2]:
+                step = range_info[2]
+                quotient = (value - minimum) / step
+                if not math.isclose(
+                    quotient,
+                    round(quotient),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                ):
+                    raise ValueError("属性值不符合设备规格步长")
+
+        value_list = getattr(prop_info, "value_list", None) or []
+        if value_list:
+            allowed_values = [
+                item.get("value")
+                for item in value_list
+                if isinstance(item, dict) and "value" in item
+            ]
+            if value not in allowed_values:
+                raise ValueError("属性值不在设备规格枚举中")
+
+        method = dict(getattr(prop_info, "method", {}) or {})
+        if not method:
+            raise ValueError("设备规格缺少属性调用方法")
+        method["did"] = did
+        method["value"] = value
+        return method
+
     def _unit_suffix(self, unit: Any) -> str:
         mapping = {
             "percentage": "%",
@@ -89,10 +234,8 @@ class MiHomeClient:
         return f" {unit}"
 
     def _prepare_device_sync(self, did: str):
-        self.api.login()
-        if getattr(self.api, "device_list", None) is None:
-            logger.debug("[MiHome] 底层内存缓存为空，触发静默自愈拉取...")
-            self.api.get_devices_list()
+        # mijiaDevice 4.1.3 会自行读取设备列表；业务请求前不能调用 login()，
+        # 否则凭证失效时可能进入无法由 wait_for 停止的 120 秒扫码长轮询。
         return mijiaDevice(self.api, did=did, sleep_time=1.0)
 
     def _normalize_scene_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -190,6 +333,28 @@ class MiHomeClient:
 
         return url
 
+    def _redact_login_output(self, text: str) -> str:
+        """隐藏登录输出中的二维码链接和认证参数。"""
+
+        raw = str(text or "")
+        # 登录 URL 可能被子进程拆成多行。只要能从整体缓冲区恢复出它，
+        # 就隐藏整段原始输出，避免任何续行查询参数绕过逐行正则。
+        if self._extract_qr_url_from_buffer(raw):
+            sanitized = "[米家登录输出已隐藏]"
+        else:
+            sanitized = re.sub(
+                r"https://account\.xiaomi\.com/pass/qr/login\?[^\s]+",
+                "[米家登录链接已隐藏]",
+                raw,
+                flags=re.IGNORECASE,
+            )
+        return re.sub(
+            r"(?i)(ticket|serviceToken|passToken|ssecurity|deviceId|userId|token)"
+            r"([\"']?\s*[:=]\s*[\"']?)([^,\s\"'&}]+)",
+            r"\1\2[已隐藏]",
+            sanitized,
+        )
+
     async def get_login_status(self) -> Dict[str, Any]:
         state = self.data_manager.load_state()
         return {
@@ -271,9 +436,11 @@ class MiHomeClient:
                     full_buffer = (full_buffer + text)[-16384:]
 
                     if text.strip():
-                        for line in text.split("\n"):
-                            if line.strip():
-                                logger.debug(f"[Sandbox] {line.strip()}")
+                        # 登录输出可能在任意字节边界拆分二维码票据。即使逐行
+                        # 脱敏也有跨 chunk 泄露风险，因此日志只记录固定进度。
+                        logger.debug(
+                            "[Sandbox] 登录子进程有新输出，内容已隐藏。"
+                        )
 
                     if not qr_found:
                         url = self._extract_qr_url_from_buffer(full_buffer)
@@ -312,13 +479,16 @@ class MiHomeClient:
                     self.api = mijiaAPI(self.data_manager.get_auth_path())
                     return {"status": "success" if qr_found else "already_logged_in"}
                 else:
-                    err = full_buffer[-800:].strip()
+                    err = self._redact_login_output(
+                        full_buffer[-800:].strip()
+                    )
                     logger.error(f"[MiHome] 沙盒异常退出: {err}")
                     self.data_manager.update_state(last_login_error=err)
                     return {"status": "error", "message": err}
         except Exception as e:
-            self.data_manager.update_state(last_login_error=str(e))
-            return {"status": "error", "message": str(e)}
+            safe_error = self._redact_login_output(str(e))
+            self.data_manager.update_state(last_login_error=safe_error)
+            return {"status": "error", "message": safe_error}
         finally:
             self._login_status = LOGIN_IDLE
             async with self._api_lock:
@@ -330,7 +500,6 @@ class MiHomeClient:
         self._check_api()
         try:
             async with self._api_lock:
-                await asyncio.wait_for(asyncio.to_thread(self.api.login), timeout=15.0)
                 own = await asyncio.wait_for(asyncio.to_thread(self.api.get_devices_list), timeout=20.0)
                 if not isinstance(own, list):
                     own = []
@@ -396,7 +565,6 @@ class MiHomeClient:
 
         async def _fetch_once(timeout_sec: float) -> List[Dict[str, Any]]:
             async with self._api_lock:
-                await asyncio.wait_for(asyncio.to_thread(self.api.login), timeout=15.0)
                 scenes = await asyncio.wait_for(
                     asyncio.to_thread(self.api.get_scenes_list),
                     timeout=timeout_sec,
@@ -449,20 +617,28 @@ class MiHomeClient:
 
         if not scene_id:
             raise MiHomeSceneError("scene_id 不能为空")
+        if not home_id:
+            self.data_manager.update_state(
+                last_scene_error="场景缓存缺少家庭 ID",
+                last_scene_name=scene_name or scene_id,
+            )
+            raise MiHomeSceneError("scene_home_missing")
 
         try:
             async with self._api_lock:
-                logger.info(f"[MiHome] 执行场景: scene_id={scene_id}, home_id={home_id}, scene_name={scene_name}")
-                await asyncio.wait_for(asyncio.to_thread(self.api.login), timeout=15.0)
-
-                kwargs = {"scene_id": scene_id}
-                if home_id:
-                    kwargs["home_id"] = home_id
-
-                await asyncio.wait_for(
-                    asyncio.to_thread(self.api.run_scene, **kwargs),
+                logger.info(
+                    f"[MiHome] 执行场景: {scene_name or '未命名场景'}"
+                )
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.api.run_scene,
+                        scene_id=scene_id,
+                        home_id=home_id,
+                    ),
                     timeout=20.0,
                 )
+                if result is not True:
+                    raise MiHomeSceneError("scene_unconfirmed")
 
             self.data_manager.update_state(
                 last_scene_error="",
@@ -508,16 +684,12 @@ class MiHomeClient:
                     if norm_k not in all_props:
                         all_props.append(norm_k)
 
-                    rw = getattr(p_info, "rw", [])
-                    rw_set = set()
-                    if isinstance(rw, (list, tuple, set)):
-                        rw_set = {str(x).lower() for x in rw}
-                    elif isinstance(rw, str):
-                        rw_set = {rw.lower()}
-
-                    if "write" in rw_set and norm_k not in writable:
+                    is_readable, is_writable = self._parse_rw_field(
+                        getattr(p_info, "rw", None)
+                    )
+                    if is_writable and norm_k not in writable:
                         writable.append(norm_k)
-                    if "read" in rw_set and norm_k not in readable:
+                    if is_readable and norm_k not in readable:
                         readable.append(norm_k)
 
                 for raw_k in action_list.keys():
@@ -598,14 +770,9 @@ class MiHomeClient:
                     if norm_k in seen_writable:
                         continue
 
-                    rw = getattr(p_info, "rw", [])
-                    is_writable = False
-                    if isinstance(rw, (list, tuple, set)):
-                        rw_set = {str(x).lower() for x in rw}
-                        if "write" in rw_set:
-                            is_writable = True
-                    elif isinstance(rw, str) and "write" in rw.lower():
-                        is_writable = True
+                    _is_readable, is_writable = self._parse_rw_field(
+                        getattr(p_info, "rw", None)
+                    )
 
                     if is_writable:
                         seen_writable.add(norm_k)
@@ -670,57 +837,126 @@ class MiHomeClient:
         except Exception as e:
             return {"__error__": f"接口异常:{type(e).__name__}"}
 
-    async def control_power(self, did: str, is_on: bool, device_name: str = "") -> None:
+    async def control_power(
+        self,
+        did: str,
+        is_on: bool,
+        device_name: str = "",
+    ) -> bool:
+        return await self.set_property(did, "on", is_on, device_name)
+
+    async def set_property(
+        self,
+        did: str,
+        prop: str,
+        value: Any,
+        device_name: str = "",
+    ) -> bool:
         self._check_idle()
         self._check_api()
         try:
             async with self._api_lock:
-                logger.info(f"[MiHome] 执行开关控制: {device_name} ({did}) -> {'开' if is_on else '关'}")
+                logger.info(
+                    f"[MiHome] 执行属性控制: {device_name or '未命名设备'}"
+                    f" -> property={prop}"
+                )
                 device = await asyncio.wait_for(
                     asyncio.to_thread(self._prepare_device_sync, did),
                     timeout=15.0,
                 )
-                await asyncio.wait_for(
-                    asyncio.to_thread(device.set, "on", is_on),
+                method = self._build_property_method(
+                    device,
+                    did,
+                    prop,
+                    value,
+                )
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(self.api.set_devices_prop, method),
                     timeout=15.0,
                 )
+                confirmed = self._validate_action_response(response)
             self.data_manager.update_state(last_control_error="", last_control_device=device_name or did)
+            return confirmed
         except Exception as e:
             self._handle_control_exception(e, device_name or did)
 
-    async def set_property(self, did: str, prop: str, value: Any, device_name: str = "") -> None:
+    async def run_action(
+        self,
+        did: str,
+        action: str,
+        device_name: str = "",
+    ) -> bool:
         self._check_idle()
         self._check_api()
         try:
             async with self._api_lock:
-                logger.info(f"[MiHome] 执行高级控制: {device_name} ({did}) -> [{prop}] = {value}")
+                logger.info(
+                    f"[MiHome] 执行动作控制: {device_name or '未命名设备'}"
+                    f" -> action={action}"
+                )
                 device = await asyncio.wait_for(
                     asyncio.to_thread(self._prepare_device_sync, did),
                     timeout=15.0,
                 )
-                await asyncio.wait_for(
-                    asyncio.to_thread(device.set, prop, value),
+                action_list = getattr(device, "action_list", {})
+                if not isinstance(action_list, dict) or action not in action_list:
+                    raise MiHomeControlError(f"action_not_found:{action}")
+                action_info = action_list[action]
+                method = dict(getattr(action_info, "method", {}) or {})
+                if not method:
+                    raise MiHomeControlError(f"action_schema_missing:{action}")
+                method["did"] = did
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(self.api.run_action, method),
                     timeout=15.0,
                 )
+                confirmed = self._validate_action_response(response)
             self.data_manager.update_state(last_control_error="", last_control_device=device_name or did)
+            return confirmed
         except Exception as e:
             self._handle_control_exception(e, device_name or did)
 
-    async def run_action(self, did: str, action: str, device_name: str = "") -> None:
+    async def run_action_with_in(
+        self,
+        did: str,
+        action: str,
+        in_params: List[Dict[str, Any]],
+        device_name: str = "",
+    ) -> bool:
+        """按 MIoT ``in`` 数组执行已验证过参数结构的动作。"""
+
         self._check_idle()
         self._check_api()
         try:
             async with self._api_lock:
-                logger.info(f"[MiHome] 执行动作控制: {device_name} ({did}) -> action={action}")
+                logger.info(
+                    f"[MiHome] 执行带参动作: {device_name or '未命名设备'}"
+                    f" -> action={action}, parameter_count={len(in_params)}"
+                )
                 device = await asyncio.wait_for(
                     asyncio.to_thread(self._prepare_device_sync, did),
                     timeout=15.0,
                 )
-                await asyncio.wait_for(
-                    asyncio.to_thread(device.run_action, action),
+                action_list = getattr(device, "action_list", {})
+                if not isinstance(action_list, dict) or action not in action_list:
+                    raise MiHomeControlError(f"action_not_found:{action}")
+
+                action_info = action_list[action]
+                method = dict(getattr(action_info, "method", {}) or {})
+                if not method:
+                    raise MiHomeControlError(f"action_schema_missing:{action}")
+                method["did"] = did
+                method["in"] = in_params
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(self.api.run_action, method),
                     timeout=15.0,
                 )
-            self.data_manager.update_state(last_control_error="", last_control_device=device_name or did)
+                confirmed = self._validate_action_response(response)
+            self.data_manager.update_state(
+                last_control_error="",
+                last_control_device=device_name or did,
+            )
+            return confirmed
         except Exception as e:
             self._handle_control_exception(e, device_name or did)
 
@@ -740,10 +976,19 @@ class MiHomeClient:
         elif isinstance(e, RequestException):
             self.data_manager.update_state(last_scene_error=f"网络异常: {type(e).__name__}", last_scene_name=scene_name)
             raise MiHomeClientError(f"网络请求失败: {type(e).__name__}") from e
+        elif isinstance(e, MiHomeSceneError):
+            self.data_manager.update_state(
+                last_scene_error=str(e),
+                last_scene_name=scene_name,
+            )
+            raise
         else:
-            logger.error(f"[MiHome] 场景异常: type={type(e).__name__}, detail={e}")
-            self.data_manager.update_state(last_scene_error=f"内部错误: {e}", last_scene_name=scene_name)
-            raise MiHomeSceneError(str(e)) from e
+            logger.error(f"[MiHome] 场景异常: type={type(e).__name__}")
+            self.data_manager.update_state(
+                last_scene_error=f"内部错误: {type(e).__name__}",
+                last_scene_name=scene_name,
+            )
+            raise MiHomeSceneError("internal_error") from e
 
     def _handle_control_exception(self, e: Exception, device_name: str):
         if isinstance(e, asyncio.TimeoutError):
@@ -758,6 +1003,12 @@ class MiHomeClient:
         elif isinstance(e, (DeviceSetError, DeviceActionError)):
             self.data_manager.update_state(last_control_error=f"被拒: {e}", last_control_device=device_name)
             raise MiHomeControlError("device_rejected") from e
+        elif isinstance(e, MiHomeControlError):
+            self.data_manager.update_state(
+                last_control_error=str(e),
+                last_control_device=device_name,
+            )
+            raise
         elif isinstance(e, APIError):
             self.data_manager.update_state(last_control_error=f"云端拒绝: {e}", last_control_device=device_name)
             raise MiHomeClientError(f"云端拒绝请求: {e}") from e
@@ -767,10 +1018,19 @@ class MiHomeClient:
         elif isinstance(e, RequestException):
             self.data_manager.update_state(last_control_error=f"网络异常: {type(e).__name__}", last_control_device=device_name)
             raise MiHomeClientError(f"网络请求失败: {type(e).__name__}") from e
+        elif isinstance(e, ValueError):
+            self.data_manager.update_state(
+                last_control_error="参数或设备能力不匹配",
+                last_control_device=device_name,
+            )
+            raise MiHomeControlError("invalid_value_or_capability") from e
         else:
-            logger.error(f"[MiHome] 控制异常: type={type(e).__name__}, detail={e}")
-            self.data_manager.update_state(last_control_error=f"内部错误: {e}", last_control_device=device_name)
-            raise MiHomeControlError(str(e)) from e
+            logger.error(f"[MiHome] 控制异常: type={type(e).__name__}")
+            self.data_manager.update_state(
+                last_control_error=f"内部错误: {type(e).__name__}",
+                last_control_device=device_name,
+            )
+            raise MiHomeControlError("internal_error") from e
 
     async def terminate(self):
         async with self._api_lock:
