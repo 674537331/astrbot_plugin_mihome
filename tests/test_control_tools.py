@@ -3,11 +3,16 @@ import asyncio
 import ast
 import importlib.util
 import json
+import os
+import stat
 import sys
+import tempfile
+import threading
 import types
 import unittest
+from decimal import Decimal
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +45,20 @@ def _install_stubs():
     class _Device:
         pass
 
+    class _DevProp:
+        def __init__(self, data):
+            self.description = data.get("description", "")
+            self.rw = data.get("rw", "")
+            self.type = data.get("type", "")
+            self.range = data.get("range")
+            self.value_list = data.get("value-list")
+            self.method = data.get("method", {})
+
+    class _DevAction:
+        def __init__(self, data):
+            self.description = data.get("description", "")
+            self.method = data.get("method", {})
+
     mijia.mijiaAPI = _API
     mijia.mijiaDevice = _Device
     for name in (
@@ -52,6 +71,10 @@ def _install_stubs():
     ):
         setattr(mijia, name, type(name, (Exception,), {}))
     sys.modules["mijiaAPI"] = mijia
+    devices = types.ModuleType("mijiaAPI.devices")
+    devices.DevProp = _DevProp
+    devices.DevAction = _DevAction
+    sys.modules["mijiaAPI.devices"] = devices
 
     package = types.ModuleType(PACKAGE)
     package.__path__ = [str(ROOT)]
@@ -59,7 +82,10 @@ def _install_stubs():
 
 
 _install_stubs()
-_load_module(f"{PACKAGE}.data_manager", ROOT / "data_manager.py")
+data_manager_module = _load_module(
+    f"{PACKAGE}.data_manager",
+    ROOT / "data_manager.py",
+)
 profiles = _load_module(f"{PACKAGE}.device_profiles", ROOT / "device_profiles.py")
 client_module = _load_module(f"{PACKAGE}.mihome_client", ROOT / "mihome_client.py")
 control_module = _load_module(f"{PACKAGE}.control_tools", ROOT / "control_tools.py")
@@ -251,6 +277,103 @@ class PropertyControlTests(unittest.IsolatedAsyncioTestCase):
             service._reserve_execution("same-did", "别名二"),
         )
 
+    def test_cooldown_tracking_is_bounded_without_dropping_active_entries(self):
+        service = control_module.MiHomeControlTools(_Plugin())
+        with patch.object(
+            control_module.time,
+            "monotonic",
+            return_value=100.0,
+        ):
+            for index in range(
+                control_module.MAX_COOLDOWN_TRACKED_DEVICES
+            ):
+                self.assertIsNone(
+                    service._reserve_execution(
+                        f"did-{index}",
+                        f"设备 {index}",
+                    )
+                )
+            self.assertIn(
+                "请求过多",
+                service._reserve_execution("overflow", "额外设备"),
+            )
+            self.assertIn(
+                "操作过于频繁",
+                service._reserve_execution("did-0", "设备 0"),
+            )
+
+        self.assertEqual(
+            len(service._last_execution_at),
+            control_module.MAX_COOLDOWN_TRACKED_DEVICES,
+        )
+
+    def test_cooldown_tracking_removes_only_expired_entries(self):
+        service = control_module.MiHomeControlTools(_Plugin())
+        service._last_execution_at = {
+            "expired": 96.0,
+            "active": 99.0,
+        }
+        with patch.object(
+            control_module.time,
+            "monotonic",
+            return_value=100.0,
+        ):
+            self.assertIsNone(
+                service._reserve_execution("new", "新设备")
+            )
+
+        self.assertNotIn("expired", service._last_execution_at)
+        self.assertIn("active", service._last_execution_at)
+        self.assertIn("new", service._last_execution_at)
+
+
+class ViomiAirConditionProfileTests(unittest.TestCase):
+    def setUp(self):
+        self.plugin = _Plugin(
+            model="viomi.aircondition.y71",
+            category=profiles.CATEGORY_AC,
+        )
+        self.service = control_module.MiHomeControlTools(self.plugin)
+        self.device, error = self.service._resolve_allowed_device("客厅空调")
+        self.assertIsNone(error)
+        self.assertIsNotNone(self.device)
+
+    def test_profile_uses_property_scoped_enum_values(self):
+        mode = self.service._translate_property(
+            self.device,
+            "模式",
+            "自动模式",
+        )
+        fan = self.service._translate_property(
+            self.device,
+            "风速",
+            "自动风",
+        )
+        wrong_enum = self.service._translate_property(
+            self.device,
+            "风速",
+            "自动模式",
+        )
+
+        self.assertTrue(mode["ok"])
+        self.assertEqual(mode["value"], 1)
+        self.assertTrue(fan["ok"])
+        self.assertEqual(fan["value"], 0)
+        self.assertFalse(wrong_enum["ok"])
+
+    def test_profile_excludes_internal_coordination_writes(self):
+        capabilities = self.service._aggregate_capabilities(self.device)
+        writable = {
+            item["key"] for item in capabilities["writable_properties"]
+        }
+
+        self.assertTrue(capabilities["direct_control_supported"])
+        self.assertIn("target_temperature", writable)
+        self.assertNotIn("average_temperature", writable)
+        self.assertNotIn("average_humidity", writable)
+        self.assertNotIn("temp_unbalance", writable)
+        self.assertEqual(capabilities["actions"], [])
+
 
 class ActionTests(unittest.IsolatedAsyncioTestCase):
     async def test_parameterized_action_is_scoped_and_output_hides_text(self):
@@ -270,6 +393,31 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("成功", result)
         self.assertNotIn(secret_text, result)
 
+    async def test_cross_device_speaker_actions_are_never_exposed(self):
+        plugin = _Plugin(
+            model="xiaomi.wifispeaker.oh2p",
+            category="音箱类别",
+        )
+        service = control_module.MiHomeControlTools(plugin)
+        device, error = service._resolve_allowed_device("客厅空调")
+        self.assertIsNone(error)
+
+        capabilities = service._aggregate_capabilities(device)
+        action_keys = {item["key"] for item in capabilities["actions"]}
+        self.assertNotIn("execute-text-directive", action_keys)
+        self.assertNotIn("tv-switchon", action_keys)
+
+        for action in ("execute-text-directive", "tv-switchon"):
+            result = await service.call_action(
+                _Event(),
+                "客厅空调",
+                action,
+                [],
+            )
+            self.assertIn("不支持动作", result)
+        plugin.client.run_action.assert_not_awaited()
+        plugin.client.run_action_with_in.assert_not_awaited()
+
     async def test_unverified_action_parameters_are_not_forwarded(self):
         plugin = _Plugin(model="xiaomi.vacuum.ov21cn", category="扫地机类别")
         service = control_module.MiHomeControlTools(plugin)
@@ -279,7 +427,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
             "start_sweep",
             ["unexpected"],
         )
-        self.assertIn("不会把参数直接透传", result)
+        self.assertIn("仅接受无参调用", result)
         plugin.client.run_action.assert_not_awaited()
 
     def test_strict_bool_parameter_rejects_unknown_strings(self):
@@ -315,6 +463,478 @@ class ClientCompatibilityTests(unittest.TestCase):
         self.assertFalse(
             client_module.MiHomeClient._validate_action_response({})
         )
+
+    def test_integer_properties_reject_fractional_values(self):
+        client = object.__new__(client_module.MiHomeClient)
+        prop = types.SimpleNamespace(
+            rw="rw",
+            type="int",
+            range=[16, 31, 1],
+            value_list=None,
+            method={"siid": 2, "piid": 1},
+        )
+        device = types.SimpleNamespace(prop_list={"target_temperature": prop})
+
+        for invalid in (26.9, Decimal("26.9"), "26.9"):
+            with self.assertRaises(ValueError):
+                client._build_property_method(
+                    device,
+                    "did",
+                    "target_temperature",
+                    invalid,
+                )
+
+        method = client._build_property_method(
+            device,
+            "did",
+            "target_temperature",
+            Decimal("26.0"),
+        )
+        self.assertEqual(method["value"], 26)
+
+    def test_api_session_receives_default_network_timeout(self):
+        client = object.__new__(client_module.MiHomeClient)
+        original_request = MagicMock(return_value="ok")
+        session = types.SimpleNamespace(request=original_request)
+        client.api = types.SimpleNamespace(session=session)
+
+        client._configure_api_session()
+        result = session.request("POST", "https://example.invalid")
+
+        self.assertEqual(result, "ok")
+        original_request.assert_called_once_with(
+            "POST",
+            "https://example.invalid",
+            timeout=client_module.HTTP_REQUEST_TIMEOUT,
+        )
+
+    def test_api_session_timeout_survives_upstream_session_rebuild(self):
+        class FakeAPI:
+            def __init__(self):
+                self.session = types.SimpleNamespace(
+                    request=MagicMock(return_value="first")
+                )
+
+            def _init_session(self):
+                self.session = types.SimpleNamespace(
+                    request=MagicMock(return_value="rebuilt")
+                )
+
+            def _get_location(self):
+                return {}
+
+        client = object.__new__(client_module.MiHomeClient)
+        api = FakeAPI()
+        client._configure_api_instance(api)
+
+        api._init_session()
+        rebuilt_request = api.session.request.func
+        result = api.session.request("POST", "https://example.invalid")
+
+        self.assertEqual(result, "rebuilt")
+        rebuilt_request.assert_called_once_with(
+            "POST",
+            "https://example.invalid",
+            timeout=client_module.HTTP_REQUEST_TIMEOUT,
+        )
+
+    def test_token_location_request_has_explicit_timeout(self):
+        response = types.SimpleNamespace(status_code=200, text="ok")
+        service_session = MagicMock()
+        service_session.__enter__.return_value = service_session
+        service_session.get.return_value = response
+        api_session = types.SimpleNamespace(
+            request=MagicMock(),
+            get=MagicMock(),
+        )
+        api = types.SimpleNamespace(
+            user_agent="ua",
+            deviceId="device",
+            pass_o="pass",
+            auth_data={
+                "passToken": "pass-token",
+                "userId": "user",
+                "cUserId": "c-user",
+            },
+            locale="zh_CN",
+            service_login_url="https://account.example.invalid",
+            session=api_session,
+            _handle_ret=MagicMock(
+                return_value={
+                    "code": 1,
+                    "location": "https://callback.invalid/?code=1",
+                }
+            ),
+            _init_session=MagicMock(),
+            _get_location=MagicMock(),
+        )
+        client = object.__new__(client_module.MiHomeClient)
+
+        with patch.object(
+            client_module.requests,
+            "Session",
+            return_value=service_session,
+        ):
+            client._configure_api_instance(api)
+            result = api._get_location()
+
+        self.assertEqual(result, {"code": "1"})
+        service_session.get.assert_called_once()
+        self.assertEqual(
+            service_session.get.call_args.kwargs["timeout"],
+            client_module.HTTP_REQUEST_TIMEOUT,
+        )
+
+    def test_prepare_device_uses_validated_local_spec_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            auth_path = Path(temp_dir) / "auth.json"
+            model = "example.switch.v1"
+            spec_path = Path(temp_dir) / f"{model}.json"
+            spec_path.write_text(
+                json.dumps(
+                    {
+                        "name": "测试开关",
+                        "model": model,
+                        "properties": [
+                            {
+                                "name": "on",
+                                "description": "开关",
+                                "type": "bool",
+                                "rw": "rw",
+                                "range": None,
+                                "value-list": None,
+                                "method": {"siid": 2, "piid": 1},
+                            }
+                        ],
+                        "actions": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            client = object.__new__(client_module.MiHomeClient)
+            client.data_manager = MagicMock()
+            client.data_manager.get_auth_path.return_value = str(auth_path)
+            client.api = types.SimpleNamespace(
+                get_devices_list=MagicMock(
+                    return_value=[
+                        {
+                            "did": "did-1",
+                            "name": "客厅开关",
+                            "model": model,
+                        }
+                    ]
+                )
+            )
+
+            with patch.object(
+                client_module.subprocess,
+                "run",
+                side_effect=AssertionError("valid cache must skip worker"),
+            ):
+                with patch.object(
+                    client_module.time,
+                    "monotonic",
+                    return_value=100.0,
+                ):
+                    device = client._prepare_device_sync("did-1")
+                with patch.object(
+                    client_module.time,
+                    "monotonic",
+                    return_value=110.0,
+                ):
+                    cached_device = client._prepare_device_sync("did-1")
+                with patch.object(
+                    client_module.time,
+                    "monotonic",
+                    return_value=161.0,
+                ):
+                    refreshed_device = client._prepare_device_sync("did-1")
+
+            self.assertEqual(device.name, "客厅开关")
+            self.assertIn("on", device.prop_list)
+            self.assertIs(cached_device, device)
+            self.assertIsNot(refreshed_device, device)
+            self.assertEqual(client.api.get_devices_list.call_count, 2)
+
+    def test_prepared_device_cache_is_bounded_and_scoped_to_api(self):
+        devices = [
+            {
+                "did": f"did-{index}",
+                "name": f"设备 {index}",
+                "model": "example.switch.v1",
+            }
+            for index in range(client_module.PREPARED_DEVICE_CACHE_MAX_SIZE + 1)
+        ]
+        client = object.__new__(client_module.MiHomeClient)
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=devices)
+        )
+        client._load_or_fetch_device_spec = MagicMock(
+            return_value={
+                "name": "测试开关",
+                "properties": [],
+                "actions": [],
+            }
+        )
+
+        with patch.object(
+            client_module.time,
+            "monotonic",
+            return_value=100.0,
+        ):
+            for row in devices:
+                client._prepare_device_sync(row["did"])
+
+        self.assertEqual(
+            len(client._prepared_device_cache),
+            client_module.PREPARED_DEVICE_CACHE_MAX_SIZE,
+        )
+        self.assertNotIn("did-0", client._prepared_device_cache)
+
+        previous_api = client.api
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=[devices[-1]])
+        )
+        with patch.object(
+            client_module.time,
+            "monotonic",
+            return_value=110.0,
+        ):
+            refreshed = client._prepare_device_sync(devices[-1]["did"])
+
+        self.assertIs(refreshed.api, client.api)
+        self.assertIsNot(refreshed.api, previous_api)
+        client.api.get_devices_list.assert_called_once_with()
+
+
+class DataManagerCredentialTests(unittest.TestCase):
+    def test_windows_reparse_point_is_rejected(self):
+        path = MagicMock()
+        path.is_symlink.return_value = False
+        path.lstat.return_value = types.SimpleNamespace(
+            st_file_attributes=0x0400
+        )
+        with patch.object(data_manager_module.os, "name", "nt"):
+            self.assertTrue(
+                data_manager_module.MiHomeDataManager
+                ._is_link_or_reparse_point(path)
+            )
+
+    def test_clear_auth_is_idempotent_when_file_is_absent(self):
+        manager = object.__new__(data_manager_module.MiHomeDataManager)
+        manager.auth_path = MagicMock()
+        manager.auth_path.exists.return_value = False
+        manager.auth_path.is_symlink.return_value = False
+
+        self.assertTrue(manager.clear_auth_file())
+        manager.auth_path.unlink.assert_not_called()
+
+    def test_clear_auth_reports_successful_removal(self):
+        manager = object.__new__(data_manager_module.MiHomeDataManager)
+        manager.auth_path = MagicMock()
+        manager.auth_path.exists.return_value = True
+
+        self.assertTrue(manager.clear_auth_file())
+        manager.auth_path.unlink.assert_called_once_with()
+
+    def test_clear_auth_reports_permission_failure(self):
+        manager = object.__new__(data_manager_module.MiHomeDataManager)
+        manager.auth_path = MagicMock()
+        manager.auth_path.exists.return_value = True
+        manager.auth_path.unlink.side_effect = PermissionError("locked")
+
+        self.assertFalse(manager.clear_auth_file())
+
+    def test_auth_file_is_hardened_to_owner_only_on_posix(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            auth_path = Path(temp_dir) / "auth.json"
+            auth_path.write_text("{}", encoding="utf-8")
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.auth_path = auth_path
+
+            self.assertTrue(manager.harden_auth_file())
+            if os.name != "nt":
+                self.assertEqual(
+                    stat.S_IMODE(auth_path.stat().st_mode),
+                    0o600,
+                )
+
+    def test_broken_auth_symlink_is_rejected_before_use(self):
+        manager = object.__new__(data_manager_module.MiHomeDataManager)
+        manager.data_dir = MagicMock()
+        manager.auth_path = MagicMock()
+        manager.auth_path.is_symlink.return_value = True
+        manager.auth_path.exists.return_value = False
+        manager._harden_path = MagicMock(return_value=True)
+
+        self.assertFalse(manager.auth_storage_is_secure())
+        manager.auth_path.is_file.assert_not_called()
+
+    def test_atomic_state_replace_failure_preserves_previous_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+            manager.state_path.write_text('{"old": true}', encoding="utf-8")
+
+            with patch.object(
+                data_manager_module.os,
+                "replace",
+                side_effect=PermissionError("locked"),
+            ):
+                self.assertFalse(manager.save_state({"new": True}))
+
+            self.assertEqual(
+                manager.state_path.read_text(encoding="utf-8"),
+                '{"old": true}',
+            )
+            self.assertEqual(list(manager.data_dir.glob(".state-*.tmp")), [])
+
+    def test_unchanged_state_update_skips_atomic_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+            manager.state_path.write_text(
+                '{"login_status": "success", "devices": ["did-1"]}',
+                encoding="utf-8",
+            )
+
+            with patch.object(manager, "save_state") as save_state:
+                self.assertTrue(
+                    manager.update_state(
+                        login_status="success",
+                        devices=["did-1"],
+                    )
+                )
+
+            save_state.assert_not_called()
+
+    def test_corrupt_state_is_backed_up_before_atomic_recovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+            manager.state_path.write_text("{broken", encoding="utf-8")
+
+            self.assertEqual(manager.load_state(), {})
+            self.assertTrue(manager.update_state(recovered=True))
+
+            recovered = json.loads(
+                manager.state_path.read_text(encoding="utf-8")
+            )
+            backups = list(
+                manager.data_dir.glob("state.json.corrupt-*")
+            )
+            self.assertEqual(recovered, {"recovered": True})
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(
+                backups[0].read_text(encoding="utf-8"),
+                "{broken",
+            )
+
+    def test_empty_update_still_recovers_corrupt_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+            manager.state_path.write_text("{broken", encoding="utf-8")
+
+            self.assertTrue(manager.update_state())
+            self.assertEqual(
+                json.loads(manager.state_path.read_text(encoding="utf-8")),
+                {},
+            )
+            self.assertEqual(
+                len(list(manager.data_dir.glob("state.json.corrupt-*"))),
+                1,
+            )
+
+    def test_duplicate_corrupt_state_backup_is_reused(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+
+            for recovered_value in (1, 2):
+                manager.state_path.write_text("{same-broken", encoding="utf-8")
+                self.assertEqual(manager.load_state(), {})
+                self.assertTrue(
+                    manager.update_state(recovered=recovered_value)
+                )
+
+            backups = list(
+                manager.data_dir.glob("state.json.corrupt-*")
+            )
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(
+                backups[0].read_text(encoding="utf-8"),
+                "{same-broken",
+            )
+
+    def test_corrupt_state_backups_keep_only_latest_five(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+
+            with patch.object(
+                data_manager_module.time,
+                "time_ns",
+                side_effect=range(100, 107),
+            ):
+                for index in range(7):
+                    manager.state_path.write_text(
+                        f"{{broken-{index}",
+                        encoding="utf-8",
+                    )
+                    self.assertEqual(manager.load_state(), {})
+                    self.assertTrue(manager.update_state(recovered=index))
+
+            backups = sorted(
+                manager.data_dir.glob("state.json.corrupt-*")
+            )
+            self.assertEqual(
+                [path.name for path in backups],
+                [
+                    "state.json.corrupt-102",
+                    "state.json.corrupt-103",
+                    "state.json.corrupt-104",
+                    "state.json.corrupt-105",
+                    "state.json.corrupt-106",
+                ],
+            )
+
+    def test_explicit_logout_cleanup_removes_corrupt_state_backups(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            backup = manager.data_dir / "state.json.corrupt-123"
+            abandoned_temp = manager.data_dir / ".state-crashed.tmp"
+            backup.write_text('{"did_to_name":{"secret":"设备"}}', encoding="utf-8")
+            abandoned_temp.write_text(
+                '{"scenes":[{"scene_id":"private"}]}',
+                encoding="utf-8",
+            )
+
+            self.assertTrue(manager.clear_state_backups())
+            self.assertFalse(backup.exists())
+            self.assertFalse(abandoned_temp.exists())
 
 
 class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
@@ -353,6 +973,40 @@ class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(client_module.MiHomeControlError):
             await rejected.set_property("did", "volume", 20, "音箱")
 
+    async def test_login_status_accepts_existing_state_snapshot(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+
+        result = await client.get_login_status(
+            {
+                "last_login_at": "2026-07-24 12:00:00",
+                "last_login_error": "",
+            }
+        )
+
+        self.assertTrue(result["auth_exists"])
+        self.assertEqual(result["last_login_at"], "2026-07-24 12:00:00")
+        client.data_manager.load_state.assert_not_called()
+
+    async def test_device_sync_invalidates_prepared_device_cache(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client._prepared_device_cache = {
+            "did-1": (100.0, object(), object()),
+        }
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+        client.data_manager.update_state.return_value = True
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=[]),
+        )
+
+        self.assertEqual(await client.get_devices(), [])
+        self.assertEqual(client._prepared_device_cache, {})
+
     async def test_scene_requires_explicit_true_result(self):
         async def run_case(result):
             client = object.__new__(client_module.MiHomeClient)
@@ -375,8 +1029,687 @@ class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
                 await run_case(result)
             self.assertEqual(str(raised.exception), "scene_unconfirmed")
 
+    async def test_logout_preserves_client_state_when_auth_removal_fails(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._api_lock = asyncio.Lock()
+        client._login_process = None
+        client._login_status = client_module.LOGIN_IDLE
+        client.data_manager = MagicMock()
+        client.data_manager.clear_auth_file.return_value = False
+        original_api = object()
+        client.api = original_api
+
+        with self.assertRaises(client_module.MiHomeClientError):
+            await client.logout()
+
+        self.assertIs(client.api, original_api)
+        client.data_manager.update_state.assert_called_once_with(
+            last_login_error="本地登录凭证移除失败，请检查文件权限",
+        )
+
+    async def test_logout_keeps_auth_when_login_worker_cannot_stop(self):
+        class StuckProcess:
+            returncode = None
+
+            def kill(self):
+                raise PermissionError("still running")
+
+            async def wait(self):
+                raise OSError("wait failed")
+
+        process = StuckProcess()
+        client = object.__new__(client_module.MiHomeClient)
+        client._api_lock = asyncio.Lock()
+        client._login_process = process
+        client._login_status = client_module.LOGIN_RUNNING
+        client.data_manager = MagicMock()
+        original_api = object()
+        client.api = original_api
+
+        with self.assertRaises(client_module.MiHomeClientError):
+            await client.logout()
+
+        self.assertIs(client._login_process, process)
+        self.assertEqual(client._login_status, client_module.LOGIN_RUNNING)
+        self.assertIs(client.api, original_api)
+        client.data_manager.clear_auth_file.assert_not_called()
+
+    async def test_old_login_generation_cannot_overwrite_new_login_state(self):
+        old_process = types.SimpleNamespace(returncode=-9)
+        new_process = types.SimpleNamespace(returncode=None)
+        client = object.__new__(client_module.MiHomeClient)
+        client._api_lock = asyncio.Lock()
+        client._login_generation = 2
+        client._login_process = new_process
+        client._login_status = client_module.LOGIN_RUNNING
+
+        async with client._api_lock:
+            client._finalize_login_generation_locked(
+                old_process,
+                generation=1,
+            )
+
+        self.assertIs(client._login_process, new_process)
+        self.assertEqual(
+            client._login_status,
+            client_module.LOGIN_RUNNING,
+        )
+
+    async def test_callback_error_stops_worker_and_cleans_new_auth(self):
+        class FakeStdout:
+            def __init__(self):
+                self.chunks = [
+                    (
+                        b"https://account.xiaomi.com/pass/qr/login?"
+                        b"ticket=t&dc=d&sid=mijia"
+                    ),
+                    b"",
+                ]
+
+            async def read(self, _size):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = None
+                self.stdout = FakeStdout()
+                self.finished = asyncio.Event()
+                self.kill_count = 0
+
+            def kill(self):
+                self.kill_count += 1
+                self.returncode = -9
+                self.finished.set()
+
+            async def wait(self):
+                await self.finished.wait()
+                return self.returncode
+
+        auth_present = {"value": False}
+        data_manager = MagicMock()
+        data_manager.auth_storage_is_secure.return_value = True
+        data_manager.auth_exists.side_effect = (
+            lambda: auth_present["value"]
+        )
+
+        def clear_auth():
+            auth_present["value"] = False
+            return True
+
+        data_manager.clear_auth_file.side_effect = clear_auth
+        data_manager.get_auth_path.return_value = "auth.json"
+        process = FakeProcess()
+        client = object.__new__(client_module.MiHomeClient)
+        client.data_manager = data_manager
+        client._api_lock = asyncio.Lock()
+        client._login_generation = 0
+        client._login_process = None
+        client._login_status = client_module.LOGIN_IDLE
+        client._worker_script = "_login_worker.py"
+
+        class RaisingAsyncCallback:
+            def __call__(self, _url):
+                async def fail():
+                    auth_present["value"] = True
+                    raise RuntimeError("二维码渲染失败")
+
+                return fail()
+
+        with patch.object(
+            client_module.asyncio,
+            "create_subprocess_exec",
+            AsyncMock(return_value=process),
+        ):
+            result = await client.login(RaisingAsyncCallback())
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(process.kill_count, 1)
+        self.assertFalse(auth_present["value"])
+        data_manager.clear_auth_file.assert_called_once_with()
+        self.assertIsNone(client._login_process)
+        self.assertEqual(client._login_status, client_module.LOGIN_IDLE)
+
+    async def test_login_timeout_cleans_residual_new_auth(self):
+        class EmptyStdout:
+            async def read(self, _size):
+                return b""
+
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = None
+                self.stdout = EmptyStdout()
+                self.finished = asyncio.Event()
+                self.kill_count = 0
+
+            def kill(self):
+                self.kill_count += 1
+                self.returncode = -9
+                self.finished.set()
+
+            async def wait(self):
+                await self.finished.wait()
+                return self.returncode
+
+        auth_present = {"value": False}
+        data_manager = MagicMock()
+        data_manager.auth_storage_is_secure.return_value = True
+        data_manager.auth_exists.side_effect = (
+            lambda: auth_present["value"]
+        )
+
+        def clear_auth():
+            auth_present["value"] = False
+            return True
+
+        data_manager.clear_auth_file.side_effect = clear_auth
+        data_manager.get_auth_path.return_value = "auth.json"
+        process = FakeProcess()
+        client = object.__new__(client_module.MiHomeClient)
+        client.data_manager = data_manager
+        client._api_lock = asyncio.Lock()
+        client._login_generation = 0
+        client._login_process = None
+        client._login_status = client_module.LOGIN_IDLE
+        client._worker_script = "_login_worker.py"
+        original_wait_for = asyncio.wait_for
+
+        async def force_login_timeout(awaitable, timeout):
+            if timeout == 120.0:
+                auth_present["value"] = True
+                awaitable.cancel()
+                try:
+                    await awaitable
+                except asyncio.CancelledError:
+                    pass
+                raise asyncio.TimeoutError
+            return await original_wait_for(awaitable, timeout=timeout)
+
+        with (
+            patch.object(
+                client_module.asyncio,
+                "create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ),
+            patch.object(
+                client_module.asyncio,
+                "wait_for",
+                side_effect=force_login_timeout,
+            ),
+        ):
+            result = await client.login(MagicMock())
+
+        self.assertEqual(result["status"], "qrcode_not_found")
+        self.assertEqual(process.kill_count, 1)
+        self.assertFalse(auth_present["value"])
+        data_manager.clear_auth_file.assert_called_once_with()
+        self.assertIsNone(client._login_process)
+        self.assertEqual(client._login_status, client_module.LOGIN_IDLE)
+
+    def test_failed_login_cleanup_preserves_preexisting_auth(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+
+        self.assertTrue(client._cleanup_new_login_auth(True))
+        client.data_manager.clear_auth_file.assert_not_called()
+
+    async def test_logout_clears_old_api_before_reinitialization_failure(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._api_lock = asyncio.Lock()
+        client._login_process = None
+        client._login_status = client_module.LOGIN_IDLE
+        client.data_manager = MagicMock()
+        client.data_manager.clear_auth_file.return_value = True
+        client.data_manager.auth_storage_is_secure.return_value = False
+        session = MagicMock()
+        client.api = types.SimpleNamespace(session=session)
+
+        with self.assertRaises(client_module.MiHomeClientError):
+            await client.logout()
+
+        self.assertIsNone(client.api)
+        session.close.assert_called_once_with()
+
+    async def test_corrupt_auth_keeps_client_recoverable_via_logout(self):
+        data_manager = MagicMock()
+        data_manager.get_auth_path.return_value = "auth.json"
+        data_manager.clear_auth_file.return_value = True
+        recovered_api = types.SimpleNamespace()
+        original_factory = client_module.mijiaAPI
+        client_module.mijiaAPI = MagicMock(
+            side_effect=[
+                json.JSONDecodeError("invalid", "", 0),
+                recovered_api,
+            ]
+        )
+        try:
+            client = client_module.MiHomeClient(data_manager)
+            self.assertIsNone(client.api)
+            data_manager.clear_auth_file.assert_not_called()
+
+            self.assertTrue(await client.logout())
+            self.assertIs(client.api, recovered_api)
+            data_manager.clear_auth_file.assert_called_once_with()
+            reset_payload = data_manager.update_state.call_args_list[-1].kwargs
+            self.assertEqual(reset_payload["scenes"], [])
+            self.assertEqual(reset_payload["did_to_name"], {})
+            self.assertEqual(reset_payload["did_to_model"], {})
+        finally:
+            client_module.mijiaAPI = original_factory
+
+    async def test_insecure_auth_storage_blocks_api_initialization(self):
+        data_manager = MagicMock()
+        data_manager.auth_storage_is_secure.return_value = False
+        original_factory = client_module.mijiaAPI
+        client_module.mijiaAPI = MagicMock()
+        try:
+            client = client_module.MiHomeClient(data_manager)
+            self.assertIsNone(client.api)
+            client_module.mijiaAPI.assert_not_called()
+            data_manager.update_state.assert_called_once()
+        finally:
+            client_module.mijiaAPI = original_factory
+
+    async def test_slow_sync_call_keeps_serial_order_until_thread_finishes(self):
+        client = object.__new__(client_module.MiHomeClient)
+        lock = asyncio.Lock()
+        started = threading.Event()
+        release = threading.Event()
+        order = []
+
+        def first_call():
+            started.set()
+            release.wait(timeout=1)
+            return "first"
+
+        def second_call():
+            return "second"
+
+        async def guarded(label, func):
+            async with lock:
+                order.append(f"{label}:start")
+                result = await client._run_sync_call(
+                    func,
+                    warn_after=0.01,
+                    operation=label,
+                )
+                order.append(f"{label}:done")
+                return result
+
+        first = asyncio.create_task(guarded("first", first_call))
+        self.assertTrue(await asyncio.to_thread(started.wait, 0.5))
+        second = asyncio.create_task(guarded("second", second_call))
+        await asyncio.sleep(0.03)
+
+        self.assertFalse(first.done())
+        self.assertEqual(order, ["first:start"])
+
+        release.set()
+        self.assertEqual(await first, "first")
+        self.assertEqual(await second, "second")
+        self.assertEqual(
+            order,
+            ["first:start", "first:done", "second:start", "second:done"],
+        )
+
+    async def test_device_status_uses_one_batch_request(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.api = types.SimpleNamespace(
+            get_devices_prop=MagicMock(
+                return_value=[
+                    {
+                        "did": "did",
+                        "siid": 2,
+                        "piid": 1,
+                        "code": 0,
+                        "value": 26.123,
+                    },
+                    {
+                        "did": "did",
+                        "siid": 3,
+                        "piid": 1,
+                        "code": -1,
+                    },
+                ]
+            )
+        )
+        temperature = types.SimpleNamespace(
+            rw="r",
+            method={"siid": 2, "piid": 1},
+            unit="celsius",
+        )
+        humidity = types.SimpleNamespace(
+            rw="r",
+            method={"siid": 3, "piid": 1},
+            unit="percentage",
+        )
+        device = types.SimpleNamespace(
+            prop_list={
+                "temperature": temperature,
+                "relative-humidity": humidity,
+            }
+        )
+        client._prepare_device_sync = MagicMock(return_value=device)
+
+        result = await client.get_device_props(
+            "did",
+            ["temperature", "relative_humidity", "unknown"],
+        )
+
+        client.api.get_devices_prop.assert_called_once()
+        request = client.api.get_devices_prop.call_args.args[0]
+        self.assertEqual(len(request), 2)
+        self.assertEqual(result["readable"]["temperature"], "26.12°C")
+        self.assertIn("relative_humidity", result["readable_keys"])
+        self.assertIn("unknown", result["readable_keys"])
+
+    async def test_batch_status_propagates_auth_failure(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.api = types.SimpleNamespace(
+            get_devices_prop=MagicMock(
+                side_effect=client_module.LoginError("expired")
+            )
+        )
+        prop = types.SimpleNamespace(
+            rw="r",
+            method={"siid": 2, "piid": 1},
+            unit="celsius",
+        )
+        client._prepare_device_sync = MagicMock(
+            return_value=types.SimpleNamespace(
+                prop_list={"temperature": prop}
+            )
+        )
+
+        result = await client.get_device_props("did", ["temperature"])
+
+        self.assertEqual(result, {"__error__": "鉴权失效"})
+        self.assertNotIn("temperature", result.get("readable_keys", []))
+
+    async def test_dynamic_action_keeps_raw_key_for_execution(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+        client.data_manager.update_state.return_value = True
+        action = types.SimpleNamespace(
+            method={"siid": 2, "aiid": 1},
+        )
+        device = types.SimpleNamespace(
+            prop_list={},
+            action_list={"start-clean": action},
+        )
+        client._prepare_device_sync = MagicMock(return_value=device)
+        client.api = types.SimpleNamespace(
+            run_action=MagicMock(return_value={"code": 0}),
+        )
+
+        capabilities = await client.get_device_capabilities("did")
+        raw_action = capabilities["actions"][0]
+        confirmed = await client.run_action("did", raw_action, "清洁设备")
+
+        self.assertEqual(raw_action, "start-clean")
+        self.assertTrue(confirmed)
+        self.assertEqual(
+            client.api.run_action.call_args.args[0]["aiid"],
+            1,
+        )
+
+    async def test_shared_device_capabilities_use_shared_directory_fallback(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=[]),
+            get_shared_devices_list=MagicMock(
+                return_value=[
+                    {
+                        "did": "shared-did",
+                        "name": "共享空气净化器",
+                        "model": "example.shared.airp",
+                    }
+                ]
+            ),
+        )
+        client._load_or_fetch_device_spec = MagicMock(
+            return_value={
+                "name": "共享设备",
+                "properties": [
+                    {
+                        "name": "on",
+                        "description": "开关",
+                        "type": "bool",
+                        "rw": "rw",
+                        "range": None,
+                        "value-list": None,
+                        "method": {"siid": 2, "piid": 1},
+                    }
+                ],
+                "actions": [],
+            }
+        )
+
+        capabilities = await client.get_device_capabilities("shared-did")
+
+        self.assertNotIn("__error__", capabilities)
+        self.assertIn("on", capabilities["writable"])
+        client.api.get_devices_list.assert_called_once_with()
+        client.api.get_shared_devices_list.assert_called_once_with()
+        client._load_or_fetch_device_spec.assert_called_once_with(
+            "example.shared.airp"
+        )
+
+    async def test_read_timeout_has_stable_capability_and_status_diagnostic(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+        client.api = types.SimpleNamespace()
+        client._prepare_device_sync = MagicMock(
+            side_effect=client_module.RequestsTimeout("secret upstream detail")
+        )
+
+        capability = await client.get_device_capabilities("did")
+        status = await client.get_device_props("did", ["temperature"])
+
+        expected = {"__error__": "请求超时 (设备离线或深度休眠)"}
+        self.assertEqual(capability, expected)
+        self.assertEqual(status, expected)
+
+    async def test_sync_error_does_not_expose_upstream_secret_text(self):
+        secret = "https://example.invalid/?serviceToken=secret-value"
+
+        def fail_sync():
+            raise client_module.RequestException(secret)
+
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.data_manager.update_state.return_value = True
+        client.api = types.SimpleNamespace(get_devices_list=fail_sync)
+
+        with self.assertRaises(client_module.MiHomeClientError) as raised:
+            await client.get_devices()
+
+        self.assertEqual(str(raised.exception), "network_error")
+        self.assertNotIn("secret-value", str(raised.exception))
+
+    async def test_business_request_requires_saved_credential(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = False
+        get_devices_list = MagicMock()
+        client.api = types.SimpleNamespace(get_devices_list=get_devices_list)
+
+        with self.assertRaises(client_module.MiHomeAuthError) as raised:
+            await client.get_devices()
+
+        self.assertEqual(str(raised.exception), "login_required")
+        get_devices_list.assert_not_called()
+
+    async def test_invalid_json_has_stable_diagnostic(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.api = types.SimpleNamespace()
+        client._prepare_device_sync = MagicMock(
+            side_effect=json.JSONDecodeError("invalid", "", 0)
+        )
+
+        capability = await client.get_device_capabilities("did")
+        status = await client.get_device_props("did", ["temperature"])
+
+        self.assertIn("没有返回有效数据", capability["__error__"])
+        self.assertIn("没有返回有效数据", status["__error__"])
+
+    def test_invalid_json_maps_to_stable_control_and_scene_codes(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client.data_manager = MagicMock()
+        error = json.JSONDecodeError("invalid", "", 0)
+
+        with self.assertRaises(client_module.MiHomeControlError) as control:
+            client._handle_control_exception(error, "空调")
+        with self.assertRaises(client_module.MiHomeSceneError) as scene:
+            client._handle_scene_exception(error, "回家")
+
+        self.assertEqual(str(control.exception), "cloud_no_response")
+        self.assertEqual(str(scene.exception), "cloud_no_response")
+
+    def test_cloud_no_response_has_friendly_tool_error(self):
+        message = control_module.MiHomeControlTools._format_client_error(
+            client_module.MiHomeControlError("cloud_no_response")
+        )
+        self.assertIn("没有返回有效数据", message)
+
+    def test_local_control_errors_are_not_mislabeled_as_device_rejection(self):
+        cases = {
+            "invalid_value_or_capability": "属性值",
+            "action_schema_missing:play": "动作规格",
+            "internal_error": "内部错误",
+        }
+        for reason, expected in cases.items():
+            with self.subTest(reason=reason):
+                message = (
+                    control_module.MiHomeControlTools._format_client_error(
+                        client_module.MiHomeControlError(reason)
+                    )
+                )
+                self.assertIn(expected, message)
+                self.assertNotIn("设备拒绝", message)
+
 
 class AstrBotToolSchemaTests(unittest.TestCase):
+    def test_chat_action_paths_share_cross_device_deny_guard(self):
+        for action in ("execute-text-directive", "tv-switchon"):
+            with self.subTest(action=action):
+                self.assertTrue(
+                    control_module.is_denied_device_action(action)
+                )
+
+        tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+        plugin = next(
+            item
+            for item in tree.body
+            if isinstance(item, ast.ClassDef)
+            and item.name == "MiHomeControlPlugin"
+        )
+        control = next(
+            item
+            for item in plugin.body
+            if isinstance(item, ast.AsyncFunctionDef)
+            and item.name == "control_mihome_device"
+        )
+
+        action_map_assignment = next(
+            item
+            for item in ast.walk(control)
+            if isinstance(item, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "action_map"
+                for target in item.targets
+            )
+        )
+        self.assertIsInstance(action_map_assignment.value, ast.DictComp)
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "is_denied_device_action"
+                for generator in action_map_assignment.value.generators
+                for condition in generator.ifs
+                for node in ast.walk(condition)
+            ),
+            "静态 action_map 必须通过统一 predicate 过滤",
+        )
+
+        capability_filter = [
+            node
+            for node in ast.walk(control)
+            if isinstance(node, ast.If)
+            and any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "is_denied_device_action"
+                and call.args
+                and isinstance(call.args[0], ast.Name)
+                and call.args[0].id == "act"
+                for call in ast.walk(node.test)
+            )
+            and any(isinstance(item, ast.Continue) for item in node.body)
+        ]
+        self.assertTrue(
+            capability_filter,
+            "动态 capability 动作必须通过统一 predicate 过滤",
+        )
+
+        run_action_calls = [
+            node
+            for node in ast.walk(control)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "run_action"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Name)
+        ]
+        self.assertEqual(len(run_action_calls), 2)
+        deny_guards = [
+            node
+            for node in ast.walk(control)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Call)
+            and isinstance(node.test.func, ast.Name)
+            and node.test.func.id == "is_denied_device_action"
+            and node.test.args
+            and isinstance(node.test.args[0], ast.Name)
+            and any(isinstance(item, ast.Return) for item in node.body)
+        ]
+        for call in run_action_calls:
+            action_name = call.args[1].id
+            self.assertTrue(
+                any(
+                    guard.test.args[0].id == action_name
+                    and guard.end_lineno < call.lineno
+                    and call.lineno - guard.end_lineno <= 4
+                    for guard in deny_guards
+                ),
+                f"run_action({action_name}) 前缺少统一拒绝保护",
+            )
+
     def test_control_tools_use_structured_array_docstrings(self):
         tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
         plugin = next(

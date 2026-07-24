@@ -3,7 +3,7 @@
 
 本模块吸收了 @Siq5005 在 PR #13 中提出的能力聚合与四 Tool 设计，
 但执行时只信任管理员明确配置的别名、类别/型号静态画像和设备白名单。
-动态发现结果仅用于检查，不会自动扩大可控制范围。
+动态发现结果仅用于检查，可控制范围由静态型号画像和管理员白名单共同确定。
 """
 
 import asyncio
@@ -23,6 +23,7 @@ from .device_profiles import (
     get_device_display_map,
     get_device_help_examples,
     get_device_help_hints,
+    get_device_property_value_map,
     get_device_prop_map,
     get_device_val_map,
     get_reverse_action_map as get_device_reverse_action_map,
@@ -43,6 +44,20 @@ MAX_ACTION_PARAMETERS = 4
 MAX_TEXT_PARAMETER_LENGTH = 500
 MAX_PROPERTY_VALUE_LENGTH = 256
 CONTROL_COOLDOWN_SECONDS = 3.0
+MAX_COOLDOWN_TRACKED_DEVICES = 256
+DENIED_CROSS_DEVICE_ACTIONS = frozenset(
+    {
+        "execute-text-directive",
+        "tv-switchon",
+    }
+)
+
+
+def is_denied_device_action(action: Any) -> bool:
+    """统一拦截可把指令转发到其他设备的高风险动作。"""
+
+    return str(action or "").strip().lower() in DENIED_CROSS_DEVICE_ACTIONS
+
 
 # 只有 @Siq5005 在 PR #13 中提供过实机数据的精确型号才开放带参动作。
 # 不能按动作名或“音箱类别”全局复用 PIID。
@@ -55,20 +70,6 @@ PARAMETERIZED_ACTIONS_BY_MODEL: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
                 "name": "text-content",
                 "description": "要播放的文本",
             }
-        ],
-        "execute-text-directive": [
-            {
-                "piid": 1,
-                "type": "string",
-                "name": "text-content",
-                "description": "要执行的文本指令",
-            },
-            {
-                "piid": 2,
-                "type": "bool",
-                "name": "silent-execution",
-                "description": "是否静默执行",
-            },
         ],
     }
 }
@@ -132,7 +133,7 @@ class MiHomeControlTools:
         if settings["admin_only"] and not self.plugin._event_is_admin(event):
             return "米家设备控制 Tool 当前仅允许 AstrBot 管理员调用。"
         if not settings["allowed_devices"]:
-            return "米家设备控制 Tool 尚未配置设备白名单，当前不会控制任何设备。"
+            return "米家设备控制 Tool 尚未配置设备白名单，当前控制范围为空。"
         return None
 
     def _resolve_allowed_device(
@@ -198,7 +199,14 @@ class MiHomeControlTools:
             model=model,
             category=category,
         )
-        action_keys = get_device_detail_actions(model=model, category=category)
+        action_keys = [
+            action
+            for action in get_device_detail_actions(
+                model=model,
+                category=category,
+            )
+            if not is_denied_device_action(action)
+        ]
         reverse_props = get_device_reverse_prop_map(model=model, category=category)
         reverse_actions = get_device_reverse_action_map(
             model=model,
@@ -281,7 +289,7 @@ class MiHomeControlTools:
             "readable": safe_keys("readable"),
             "writable": safe_keys("writable"),
             "actions": safe_keys("actions"),
-            "notice": "云端发现结果只用于诊断，不会自动加入可控制白名单。",
+            "notice": "云端发现结果只用于诊断，可控制白名单须由管理员显式配置。",
         }
 
     async def list_devices(self, event: Any) -> str:
@@ -346,7 +354,7 @@ class MiHomeControlTools:
             }
         result["notice"] = (
             "执行控制时只使用上述静态 writable_properties/actions，"
-            "不会使用 observed_capabilities 扩权。"
+            "可控制范围仅使用静态型号画像和管理员白名单，忽略 observed_capabilities。"
         )
         return json.dumps(result, ensure_ascii=False)
 
@@ -370,13 +378,31 @@ class MiHomeControlTools:
         """按 DID 限制连续物理操作，防止同设备多别名绕过冷却。"""
 
         now = time.monotonic()
-        last = self._last_execution_at.get(device_key, 0.0)
-        remaining = CONTROL_COOLDOWN_SECONDS - (now - last)
-        if remaining > 0:
+        expired_before = now - CONTROL_COOLDOWN_SECONDS
+        expired_keys = [
+            key
+            for key, executed_at in self._last_execution_at.items()
+            if executed_at <= expired_before
+        ]
+        for key in expired_keys:
+            self._last_execution_at.pop(key, None)
+
+        last = self._last_execution_at.get(device_key)
+        remaining = (
+            CONTROL_COOLDOWN_SECONDS - (now - last)
+            if last is not None
+            else 0.0
+        )
+        if last is not None and remaining > 0:
             return (
                 f"设备“{display_alias}”操作过于频繁，请至少等待 "
                 f"{CONTROL_COOLDOWN_SECONDS:g} 秒后再试。"
             )
+        if (
+            device_key not in self._last_execution_at
+            and len(self._last_execution_at) >= MAX_COOLDOWN_TRACKED_DEVICES
+        ):
+            return "短时间内设备控制请求过多，请稍后再试。"
         # 本方法在首个 await 之前同步执行，事件循环内的检查与占位不可分割。
         self._last_execution_at[device_key] = now
         return None
@@ -444,11 +470,33 @@ class MiHomeControlTools:
                 ],
             }
 
-        val_map = get_device_val_map(model=model, category=category)
-        if isinstance(value, str) and value.strip() in val_map:
-            cloud_value = val_map[value.strip()]
+        property_val_map = get_device_property_value_map(
+            model=model,
+            category=category,
+            property_key=cloud_prop,
+        )
+        if property_val_map:
+            if isinstance(value, str) and value.strip() in property_val_map:
+                cloud_value = property_val_map[value.strip()]
+            else:
+                cloud_value = self.plugin._parse_value(value)
+                if cloud_value not in property_val_map.values():
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"属性“{reverse.get(cloud_prop, cloud_prop)}”"
+                            "的值不在型号画像允许范围内"
+                        ),
+                        "available_properties": [
+                            reverse.get(item, item) for item in writable
+                        ],
+                    }
         else:
-            cloud_value = self.plugin._parse_value(value)
+            val_map = get_device_val_map(model=model, category=category)
+            if isinstance(value, str) and value.strip() in val_map:
+                cloud_value = val_map[value.strip()]
+            else:
+                cloud_value = self.plugin._parse_value(value)
         return {
             "ok": True,
             "property": cloud_prop,
@@ -464,11 +512,19 @@ class MiHomeControlTools:
             reason = str(error)
             if reason == "device_not_found":
                 return "米家云端找不到该设备。"
+            if reason == "cloud_no_response":
+                return "米家云端没有返回有效数据，请稍后重试。"
             if reason.startswith("cloud_rejected:"):
                 return "米家云端或设备拒绝了这项操作。"
             if reason.startswith("action_not_found:"):
                 return "设备当前能力清单中没有该动作。"
-            return "设备拒绝了这项操作。"
+            if reason == "invalid_value_or_capability":
+                return "属性值或设备能力与当前请求不匹配。"
+            if reason.startswith("action_schema_missing:"):
+                return "设备动作规格缺少调用参数，请重新同步或提交适配。"
+            if reason == "internal_error":
+                return "插件处理设备操作时发生内部错误。"
+            return "设备操作失败，请检查能力与参数。"
         if isinstance(error, MiHomeClientError):
             return "米家 API 或网络异常，请稍后重试。"
         return "插件内部执行异常。"
@@ -580,7 +636,7 @@ class MiHomeControlTools:
                 },
                 "results": results,
                 "notice": (
-                    "操作按顺序执行且不会自动回滚；unconfirmed 只表示"
+                    "操作按顺序执行，已完成项保留结果；unconfirmed 只表示"
                     "网关已接收，不能据此声称设备已经完成操作。"
                 ),
             },
@@ -638,20 +694,24 @@ class MiHomeControlTools:
             model=device["model"],
             category=device["category"],
         )
-        allowed_actions = get_device_detail_actions(
-            model=device["model"],
-            category=device["category"],
-        )
+        allowed_actions = [
+            item
+            for item in get_device_detail_actions(
+                model=device["model"],
+                category=device["category"],
+            )
+            if not is_denied_device_action(item)
+        ]
         reverse_actions = get_device_reverse_action_map(
             model=device["model"],
             category=device["category"],
         )
         action_text = str(action or "").strip()
-        if action_text in action_map:
-            cloud_action = action_map[action_text]
-        elif action_text in allowed_actions:
-            cloud_action = action_text
-        else:
+        candidate_action = action_map.get(action_text, action_text)
+        if (
+            candidate_action not in allowed_actions
+            or is_denied_device_action(candidate_action)
+        ):
             available = "、".join(
                 reverse_actions.get(item, item) for item in allowed_actions
             )
@@ -659,6 +719,7 @@ class MiHomeControlTools:
                 f"设备“{device['alias']}”不支持动作“{action_text or '(空)'}”。"
                 + (f"可用动作：{available}" if available else "当前没有可用动作。")
             )
+        cloud_action = candidate_action
 
         parsed_params, parse_error = self._parse_array(params, "params")
         if parse_error:
@@ -690,7 +751,7 @@ class MiHomeControlTools:
         else:
             if parsed_params:
                 return (
-                    "该动作没有经过带参调用验证，v8 不会把参数直接透传给云端。"
+                    "该动作未经过带参调用验证，仅接受无参调用。"
                 )
             in_params = []
 

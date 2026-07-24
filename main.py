@@ -10,7 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
 from .data_manager import MiHomeDataManager
-from .control_tools import MiHomeControlTools
+from .control_tools import MiHomeControlTools, is_denied_device_action
 from .web_api import MiHomeWebAPI
 from .mihome_client import (
     MiHomeClient,
@@ -34,6 +34,7 @@ from .device_profiles import (
     CATEGORY_SWITCH,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
+    get_device_property_value_map,
     get_device_prop_map,
     get_device_val_map,
     get_device_display_map,
@@ -104,7 +105,7 @@ READONLY_ALLOWED_CATEGORIES = {
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.0.0")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.1.0")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -133,7 +134,9 @@ class MiHomeControlPlugin(Star):
                 return {}
             return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(k).strip()}
         except Exception as e:
-            logger.warning(f"[MiHome] {key} 解析失败: {e}")
+            logger.warning(
+                f"[MiHome] {key} 解析失败: {type(e).__name__}"
+            )
             return {}
 
     def _parse_device_map(self) -> Dict[str, str]:
@@ -272,23 +275,41 @@ class MiHomeControlPlugin(Star):
     def _readonly_tool_enabled(self) -> bool:
         return bool(self.config.get("enable_readonly_tool", False))
 
-    def _get_cloud_name_by_did(self, did: str) -> str:
-        state = self.data_manager.load_state()
+    def _get_cloud_name_by_did(
+        self,
+        did: str,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if state is None:
+            state = self.data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
         return str(did_to_name.get(did, "")).strip()
 
-    def _get_model_by_did(self, did: str) -> str:
-        state = self.data_manager.load_state()
+    def _get_model_by_did(
+        self,
+        did: str,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if state is None:
+            state = self.data_manager.load_state()
         did_to_model = state.get("did_to_model", {})
         return str(did_to_model.get(did, "")).strip()
 
-    def _get_cached_scenes(self) -> List[Dict[str, Any]]:
-        state = self.data_manager.load_state()
+    def _get_cached_scenes(
+        self,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        if state is None:
+            state = self.data_manager.load_state()
         scenes = state.get("scenes", [])
         return scenes if isinstance(scenes, list) else []
 
-    def _get_scene_cache_updated_at(self) -> str:
-        state = self.data_manager.load_state()
+    def _get_scene_cache_updated_at(
+        self,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if state is None:
+            state = self.data_manager.load_state()
         return str(state.get("scene_cache_updated_at", "")).strip()
 
     def _format_scene_line(
@@ -306,11 +327,18 @@ class MiHomeControlPlugin(Star):
             line += f"  (家庭: {home_name})"
         return line
 
-    def _format_alias_line(self, idx: int, alias: str, did: str, category_map: Dict[str, str]) -> str:
+    def _format_alias_line(
+        self,
+        idx: int,
+        alias: str,
+        did: str,
+        category_map: Dict[str, str],
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
         configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
-        model = self._get_model_by_did(did)
+        model = self._get_model_by_did(did, state)
         effective_category = resolve_effective_category(model=model, category=configured_category)
-        cloud_name = self._get_cloud_name_by_did(did)
+        cloud_name = self._get_cloud_name_by_did(did, state)
 
         parts = [f"{idx}. {alias}"]
         if cloud_name and cloud_name != alias:
@@ -337,9 +365,11 @@ class MiHomeControlPlugin(Star):
         if not query:
             return None, "empty"
 
-        scenes = self._get_cached_scenes() if prefer_cache else []
-        if not scenes:
-            scenes = await self.client.get_scenes()
+        scenes = (
+            self._get_cached_scenes()
+            if prefer_cache
+            else await self.client.get_scenes()
+        )
 
         if not scenes:
             return None, "empty_list"
@@ -367,6 +397,7 @@ class MiHomeControlPlugin(Star):
     async def _render_readonly_status_by_alias(self, alias: str) -> str:
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
+        state = self.data_manager.load_state()
 
         alias = str(alias or "").strip()
         if not alias:
@@ -380,9 +411,9 @@ class MiHomeControlPlugin(Star):
 
         did = device_map[alias]
         configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
-        model = self._get_model_by_did(did)
+        model = self._get_model_by_did(did, state)
         effective_category = resolve_effective_category(model=model, category=configured_category)
-        cloud_name = self._get_cloud_name_by_did(did)
+        cloud_name = self._get_cloud_name_by_did(did, state)
 
         if effective_category == CATEGORY_NONE:
             return (
@@ -480,11 +511,13 @@ class MiHomeControlPlugin(Star):
         """清除米家登录凭证与本地状态"""
         yield event.plain_result("⏳ 正在登出...")
         try:
-            ok = await self.client.logout()
+            ok = await self.web_api.logout_account()
             yield event.plain_result("✅ 登出成功，凭证及状态已重置。" if ok else "⚠️ 凭证不存在，已重置现场。")
         except Exception as e:
-            logger.error(f"[MiHome] 登出失败: {e}")
-            yield event.plain_result(f"❌ 登出异常: {e}")
+            logger.error(f"[MiHome] 登出失败: {type(e).__name__}")
+            yield event.plain_result(
+                "❌ 登出失败，请检查插件数据目录权限后重试。"
+            )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("刷新米家")
@@ -529,9 +562,15 @@ class MiHomeControlPlugin(Star):
             res.append("\n💡 提示: 发送 /米家详情 [别名] 可查看设备实况，发送 /米家帮助 [别名] 获取控制示例，发送 /米家场景列表 查看云端场景。")
             yield event.plain_result("\n".join(res))
         except MiHomeClientError as e:
-            yield event.plain_result(f"❌ 同步设备失败: {e}")
+            logger.warning(
+                f"[MiHome] 同步设备失败: {type(e).__name__}"
+            )
+            yield event.plain_result("❌ 同步设备失败，请查看米家管理诊断。")
         except Exception as e:
-            yield event.plain_result(f"❌ 未知同步异常: {e}")
+            logger.error(
+                f"[MiHome] 未知同步异常: {type(e).__name__}"
+            )
+            yield event.plain_result("❌ 同步设备时发生内部错误。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家场景列表")
@@ -557,9 +596,15 @@ class MiHomeControlPlugin(Star):
         except MiHomeAuthError:
             yield event.plain_result("❌ 鉴权失效，请重新登录。")
         except MiHomeClientError as e:
-            yield event.plain_result(f"❌ 获取场景失败: {e}")
+            logger.warning(
+                f"[MiHome] 获取场景失败: {type(e).__name__}"
+            )
+            yield event.plain_result("❌ 获取场景失败，请查看米家管理诊断。")
         except Exception as e:
-            yield event.plain_result(f"❌ 内部错误: {e}")
+            logger.error(
+                f"[MiHome] 获取场景内部错误: {type(e).__name__}"
+            )
+            yield event.plain_result("❌ 获取场景时发生内部错误。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家场景")
@@ -613,9 +658,15 @@ class MiHomeControlPlugin(Star):
         except MiHomeSceneError as e:
             yield event.plain_result(f"❌ {self._format_scene_error(e)}")
         except MiHomeClientError as e:
-            yield event.plain_result(f"❌ API/网络异常: {e}")
+            logger.warning(
+                f"[MiHome] 场景执行客户端异常: {type(e).__name__}"
+            )
+            yield event.plain_result("❌ API 或网络异常，请稍后重试。")
         except Exception as e:
-            yield event.plain_result(f"❌ 内部错误: {e}")
+            logger.error(
+                f"[MiHome] 场景执行内部错误: {type(e).__name__}"
+            )
+            yield event.plain_result("❌ 场景执行时发生内部错误。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("米家详情")
@@ -623,6 +674,7 @@ class MiHomeControlPlugin(Star):
         """查看指定米家设备的能力与实时状态"""
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
+        state = self.data_manager.load_state()
 
         msg = event.message_str.strip()
         cmd_prefix = r"^/?米家详情\s*"
@@ -648,11 +700,11 @@ class MiHomeControlPlugin(Star):
 
         did = device_map[alias]
         configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
-        model = self._get_model_by_did(did)
+        model = self._get_model_by_did(did, state)
         model_hit = has_model_profile(model)
         hidden_props = set(get_model_hidden_props(model))
         category = resolve_effective_category(model=model, category=configured_category)
-        cloud_name = self._get_cloud_name_by_did(did)
+        cloud_name = self._get_cloud_name_by_did(did, state)
 
         if category == CATEGORY_NONE:
             yield event.plain_result(f"⏳ 正在探测【{alias}】的能力菜单...")
@@ -666,7 +718,11 @@ class MiHomeControlPlugin(Star):
                 return
 
             all_props = cap.get("all_props", [])
-            actions = cap.get("actions", [])
+            actions = [
+                action
+                for action in cap.get("actions", [])
+                if not is_denied_device_action(action)
+            ]
             lines = [f"✅ 【{alias}】支持的高级能力:"]
             if cloud_name and cloud_name != alias:
                 lines.insert(1, f"☁️ 云端名称: {cloud_name}")
@@ -691,7 +747,11 @@ class MiHomeControlPlugin(Star):
         reverse_action_map = get_reverse_action_map(model=model, category=category)
         fallback_writables = get_device_detail_writable_keys(model=model, category=category)
         fallback_readables = get_device_detail_readable_keys(model=model, category=category)
-        fallback_actions = get_device_detail_actions(model=model, category=category)
+        fallback_actions = [
+            action
+            for action in get_device_detail_actions(model=model, category=category)
+            if not is_denied_device_action(action)
+        ]
 
         stage1_lines = [f"📖 【{alias}】:"]
 
@@ -788,8 +848,10 @@ class MiHomeControlPlugin(Star):
             yield event.plain_result("\n".join(stage2_lines))
 
         except Exception as e:
-            logger.error(f"[MiHome] 获取属性异常: {e}")
-            yield event.plain_result(f"❌ 内部处理异常: {e}")
+            logger.error(
+                f"[MiHome] 获取属性异常: {type(e).__name__}"
+            )
+            yield event.plain_result("❌ 读取设备状态时发生内部错误。")
 
     @filter.command("米家帮助", alias={"mihome_help", "mihomehelp"})
     async def mihome_control_help(self, event: AstrMessageEvent):
@@ -842,7 +904,11 @@ class MiHomeControlPlugin(Star):
         reverse_prop_map = get_reverse_prop_map(model=model, category=category)
         reverse_action_map = get_reverse_action_map(model=model, category=category)
         fallback_writables = get_device_detail_writable_keys(model=model, category=category)
-        fallback_actions = get_device_detail_actions(model=model, category=category)
+        fallback_actions = [
+            action
+            for action in get_device_detail_actions(model=model, category=category)
+            if not is_denied_device_action(action)
+        ]
         help_examples = get_device_help_examples(model=model, category=category)
         action_examples = get_device_action_examples(model=model, category=category)
         help_hints = get_device_help_hints(model=model, category=category)
@@ -914,7 +980,9 @@ class MiHomeControlPlugin(Star):
         try:
             parts = shlex.split(content)
         except Exception as e:
-            logger.warning(f"[MiHome] shlex解析异常: {e}")
+            logger.warning(
+                f"[MiHome] shlex 解析异常: {type(e).__name__}"
+            )
             parts = content.split()
 
         alias, remaining_parts = self._match_device_alias(parts, device_map)
@@ -937,7 +1005,14 @@ class MiHomeControlPlugin(Star):
 
         prop_map = get_device_prop_map(model=model, category=category)
         val_map = get_device_val_map(model=model, category=category)
-        action_map = get_device_action_map(model=model, category=category)
+        action_map = {
+            alias: action
+            for alias, action in get_device_action_map(
+                model=model,
+                category=category,
+            ).items()
+            if not is_denied_device_action(action)
+        }
 
         prop_alias_norm = {str(k).strip().lower(): v for k, v in prop_map.items()}
 
@@ -954,9 +1029,13 @@ class MiHomeControlPlugin(Star):
         try:
             cap = await self.client.get_device_capabilities(did)
             for act in cap.get("actions", []):
+                if is_denied_device_action(act):
+                    continue
                 capability_actions[self._normalize_action_token(act)] = act
         except Exception as e:
-            logger.debug(f"[MiHome] 动态动作菜单探测失败: {e}")
+            logger.debug(
+                f"[MiHome] 动态动作菜单探测失败: {type(e).__name__}"
+            )
 
         full_command_norm = self._normalize_action_token(" ".join(remaining_parts))
         compact_command_norm = self._normalize_action_token("".join(remaining_parts))
@@ -976,6 +1055,9 @@ class MiHomeControlPlugin(Star):
             matched_action = capability_actions[compact_command_norm]
 
         if matched_action:
+            if is_denied_device_action(matched_action):
+                yield event.plain_result("❌ 该动作涉及跨设备指令，插件已拒绝执行。")
+                return
             yield event.plain_result(f"⏳ 正在向【{alias}】执行动作 [{matched_action}]...")
             try:
                 confirmed = await self.client.run_action(did, matched_action, alias)
@@ -990,14 +1072,19 @@ class MiHomeControlPlugin(Star):
                 err = str(e)
                 if err == "device_not_found":
                     yield event.plain_result("❌ 云端找不到设备。")
+                elif err == "cloud_no_response":
+                    yield event.plain_result("❌ 米家云端没有返回有效数据，请稍后重试。")
                 elif err == "device_rejected":
                     yield event.plain_result(
                         f"❌ 设备拒绝执行该动作。\n💡 提示: 发送 /米家帮助 {alias} 检查动作是否支持。"
                     )
                 else:
-                    yield event.plain_result(f"❌ 动作执行失败: {err}")
+                    yield event.plain_result("❌ 动作执行失败，请检查设备能力与参数。")
             except MiHomeClientError as e:
-                yield event.plain_result(f"❌ API/网络异常: {e}")
+                logger.warning(
+                    f"[MiHome] 动作执行客户端异常: {type(e).__name__}"
+                )
+                yield event.plain_result("❌ API 或网络异常，请稍后重试。")
             except Exception:
                 yield event.plain_result("❌ 内部错误。")
             return
@@ -1034,14 +1121,19 @@ class MiHomeControlPlugin(Star):
                     err = str(e)
                     if err == "device_not_found":
                         yield event.plain_result("❌ 云端找不到设备或权限受限。")
+                    elif err == "cloud_no_response":
+                        yield event.plain_result("❌ 米家云端没有返回有效数据，请稍后重试。")
                     elif err == "device_rejected":
                         yield event.plain_result(
                             f"❌ 设备在线但拒绝了请求。\n💡 提示: 发送 /米家帮助 {alias} 检查指令是否越界。"
                         )
                     else:
-                        yield event.plain_result(f"❌ 控制失败: {err}")
+                        yield event.plain_result("❌ 控制失败，请检查设备能力与参数。")
                 except MiHomeClientError as e:
-                    yield event.plain_result(f"❌ API/网络异常: {e}")
+                    logger.warning(
+                        f"[MiHome] 开关控制客户端异常: {type(e).__name__}"
+                    )
+                    yield event.plain_result("❌ API 或网络异常，请稍后重试。")
                 except Exception:
                     yield event.plain_result("❌ 内部错误。")
                 return
@@ -1052,6 +1144,9 @@ class MiHomeControlPlugin(Star):
                     or action_raw_norm.get(token_action_norm)
                     or capability_actions.get(token_action_norm)
                 )
+                if is_denied_device_action(eng_action):
+                    yield event.plain_result("❌ 该动作涉及跨设备指令，插件已拒绝执行。")
+                    return
                 yield event.plain_result(f"⏳ 正在向【{alias}】执行动作 [{eng_action}]...")
                 try:
                     confirmed = await self.client.run_action(did, eng_action, alias)
@@ -1066,14 +1161,19 @@ class MiHomeControlPlugin(Star):
                     err = str(e)
                     if err == "device_not_found":
                         yield event.plain_result("❌ 云端找不到设备。")
+                    elif err == "cloud_no_response":
+                        yield event.plain_result("❌ 米家云端没有返回有效数据，请稍后重试。")
                     elif err == "device_rejected":
                         yield event.plain_result(
                             f"❌ 设备拒绝执行该动作。\n💡 提示: 发送 /米家帮助 {alias} 检查动作是否支持。"
                         )
                     else:
-                        yield event.plain_result(f"❌ 动作执行失败: {err}")
+                        yield event.plain_result("❌ 动作执行失败，请检查设备能力与参数。")
                 except MiHomeClientError as e:
-                    yield event.plain_result(f"❌ API/网络异常: {e}")
+                    logger.warning(
+                        f"[MiHome] 动作执行客户端异常: {type(e).__name__}"
+                    )
+                    yield event.plain_result("❌ API 或网络异常，请稍后重试。")
                 except Exception:
                     yield event.plain_result("❌ 内部错误。")
                 return
@@ -1095,7 +1195,18 @@ class MiHomeControlPlugin(Star):
         prop = prop_alias_norm.get(raw_prop.strip().lower(), raw_prop.strip())
 
         raw_val_norm = raw_val_str.strip()
+        property_val_map = get_device_property_value_map(
+            model=model,
+            category=category,
+            property_key=prop,
+        )
         val_alias_norm = {str(k).strip().lower(): v for k, v in val_map.items()}
+        val_alias_norm.update(
+            {
+                str(k).strip().lower(): v
+                for k, v in property_val_map.items()
+            }
+        )
         val_mapped = val_alias_norm.get(raw_val_norm.lower(), raw_val_norm)
 
         val = self._parse_value(val_mapped)
@@ -1114,14 +1225,19 @@ class MiHomeControlPlugin(Star):
             err = str(e)
             if err == "device_not_found":
                 yield event.plain_result("❌ 云端找不到设备。")
+            elif err == "cloud_no_response":
+                yield event.plain_result("❌ 米家云端没有返回有效数据，请稍后重试。")
             elif err == "device_rejected":
                 yield event.plain_result(
                     f"❌ 设备拒绝请求 (可能值越界或为只读属性)。\n💡 提示: 发送 /米家帮助 {alias} 检查正确用法。"
                 )
             else:
-                yield event.plain_result(f"❌ 设置失败: {err}")
+                yield event.plain_result("❌ 设置失败，请检查设备能力与属性值。")
         except MiHomeClientError as e:
-            yield event.plain_result(f"❌ API/网络异常: {e}")
+            logger.warning(
+                f"[MiHome] 属性控制客户端异常: {type(e).__name__}"
+            )
+            yield event.plain_result("❌ API 或网络异常，请稍后重试。")
         except Exception:
             yield event.plain_result("❌ 内部错误。")
 
@@ -1130,8 +1246,8 @@ class MiHomeControlPlugin(Star):
         """
         列出当前插件中已配置的米家设备别名（只读工具）。
         使用限制：
-        1. 仅返回 device_map 中已显式配置的设备别名，不会读取未配置别名的设备。
-        2. 该工具不会执行任何设备控制，也不会读取设备实时状态。
+        1. 仅返回 device_map 中已显式配置的设备别名，未配置别名不在返回范围内。
+        2. 该工具只列出别名，设备控制与实时状态读取由其他工具负责。
         3. 当你需要确定某个设备的精确别名时，才应调用本工具。
         4. 若用户只是普通聊天或寒暄，不应调用本工具。
         """
@@ -1140,6 +1256,7 @@ class MiHomeControlPlugin(Star):
 
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
+        state = self.data_manager.load_state()
 
         if not device_map:
             return "当前没有已配置的米家设备别名，请先在插件配置的 device_map 中添加别名。"
@@ -1147,7 +1264,15 @@ class MiHomeControlPlugin(Star):
         lines = [f"当前已配置 {len(device_map)} 个米家设备别名："]
         for idx, alias in enumerate(sorted(device_map.keys()), 1):
             did = device_map[alias]
-            lines.append(self._format_alias_line(idx, alias, did, category_map))
+            lines.append(
+                self._format_alias_line(
+                    idx,
+                    alias,
+                    did,
+                    category_map,
+                    state,
+                )
+            )
 
         lines.append("")
         lines.append("说明：只读查询工具只能从以上别名中检索设备。")
@@ -1160,7 +1285,7 @@ class MiHomeControlPlugin(Star):
         使用限制（必须遵守）：
         1. 该工具只允许读取状态，不允许执行任何控制、动作或场景。
         2. 该工具只能从 device_map 中已配置的精确别名中检索设备，不能读取未配置别名的设备。
-        3. 该工具不会使用缓存，返回结果为实时读取。
+        3. 该工具每次调用均实时读取设备状态。
         4. 若不确定设备精确别名，应先调用 list_configured_mihome_aliases 获取别名列表。
         5. 优先用于温湿度、空气质量、电源状态、工作模式等状态查询场景。
         Args:
@@ -1174,9 +1299,15 @@ class MiHomeControlPlugin(Star):
         except MiHomeAuthError:
             return "米家登录已失效，请先重新登录。"
         except MiHomeClientError as e:
-            return f"读取设备状态失败：{e}"
+            logger.warning(
+                f"[MiHome] 只读 Tool 客户端异常: {type(e).__name__}"
+            )
+            return "读取设备状态失败，请稍后重试或查看米家管理诊断。"
         except Exception as e:
-            return f"内部错误：{e}"
+            logger.error(
+                f"[MiHome] 只读 Tool 内部错误: {type(e).__name__}"
+            )
+            return "读取设备状态时发生内部错误。"
 
     @filter.llm_tool(name="list_cached_mihome_scenes")
     async def list_cached_mihome_scenes_tool(self, event: AstrMessageEvent) -> str:
@@ -1184,7 +1315,7 @@ class MiHomeControlPlugin(Star):
         读取本插件缓存的米家场景列表（只读工具）。
 
         使用限制：
-        1. 仅用于查询当前已同步到插件缓存中的米家场景，不会实时访问云端。
+        1. 仅用于查询当前已同步到插件缓存中的米家场景，不实时访问云端。
         2. 当用户明确提到“场景”、要求执行家居控制、或你需要确认可执行场景名称时，才应调用本工具。
         3. 不要因为普通寒暄或自然表达（例如“晚安”“早安”“我要睡了”“我出门了”）就主动调用本工具。
         4. 若缓存为空，应提示用户先手动执行 /米家场景列表 完成同步。
@@ -1200,8 +1331,9 @@ class MiHomeControlPlugin(Star):
         if deny_msg:
             return deny_msg
 
-        scenes = self._get_cached_scenes()
-        updated_at = self._get_scene_cache_updated_at()
+        state = self.data_manager.load_state()
+        scenes = self._get_cached_scenes(state)
+        updated_at = self._get_scene_cache_updated_at(state)
 
         if not scenes:
             return "当前没有已缓存的米家场景列表，请先手动执行 /米家场景列表 同步场景。"
@@ -1283,9 +1415,15 @@ class MiHomeControlPlugin(Star):
         except MiHomeSceneError as e:
             return self._format_scene_error(e)
         except MiHomeClientError as e:
-            return f"场景执行异常：{e}"
+            logger.warning(
+                f"[MiHome] 场景 Tool 客户端异常: {type(e).__name__}"
+            )
+            return "场景执行失败，请稍后重试或查看米家管理诊断。"
         except Exception as e:
-            return f"内部错误：{e}"
+            logger.error(
+                f"[MiHome] 场景 Tool 内部错误: {type(e).__name__}"
+            )
+            return "场景执行时发生内部错误。"
 
     @filter.llm_tool(name="list_mihome_devices")
     async def list_mihome_devices_tool(self, event: AstrMessageEvent) -> str:
@@ -1294,7 +1432,7 @@ class MiHomeControlPlugin(Star):
 
         使用限制：
         1. 本工具只列出 control_tool.allowed_devices 中的别名，不返回 DID。
-        2. 本工具不会读取实时状态，也不会执行控制。
+        2. 本工具只返回静态画像概览；云端观测请使用 inspect_mihome_device。
         3. direct_control_supported=false 的设备只能检查，不能直接控制。
         """
         return await self.control_tools.list_devices(event)
@@ -1308,7 +1446,7 @@ class MiHomeControlPlugin(Star):
         """
         检查白名单内一台米家设备的静态可控能力与云端观测能力。
 
-        云端观测结果仅用于诊断，不会自动扩大属性或动作白名单。
+        云端观测结果仅用于诊断，属性与动作白名单由静态型号画像确定。
         Args:
             device_alias(string): 管理员已加入控制白名单的精确设备别名
         """
@@ -1326,7 +1464,7 @@ class MiHomeControlPlugin(Star):
 
         使用限制：
         1. 仅在用户明确要求控制设备时调用。
-        2. 单次最多 5 项，操作按顺序执行，部分成功不会自动回滚。
+        2. 单次最多 5 项，操作按顺序执行，已完成项保留结果。
         3. 只能使用 inspect_mihome_device 返回的 writable_properties。
         4. 在工具返回明确成功前，不得向用户声称操作已经完成。
         Args:

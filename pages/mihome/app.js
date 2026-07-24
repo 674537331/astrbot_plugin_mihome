@@ -76,6 +76,7 @@ const state = {
   categories: [...DEVICE_CATEGORIES],
   devices: [],
   originalMappings: new Map(),
+  mappingRevision: "",
   scenes: [],
   sceneCacheTime: "",
   tools: {
@@ -84,7 +85,16 @@ const state = {
     control_tool: { enable: false, admin_only: true, allowed_devices: [] },
   },
   originalTools: "",
+  toolRevision: "",
   diagnostics: {},
+  dataGeneration: 0,
+  configGeneration: 0,
+  deviceRequestId: 0,
+  toolRequestId: 0,
+  deviceLoading: false,
+  toolLoading: false,
+  mappingSaving: false,
+  toolSaving: false,
   loaded: {
     devices: false,
     scenes: false,
@@ -92,6 +102,9 @@ const state = {
     diagnostics: false,
   },
   authTimer: null,
+  authRequestId: 0,
+  authQrRevision: "",
+  drawerRequestId: 0,
   dialogResolver: null,
   previousFocus: null,
   drawerPreviousFocus: null,
@@ -114,7 +127,7 @@ function bool(value, fallback = false) {
 
 function redact(value) {
   return text(value)
-    .replace(/(authorization|token|cookie|passToken|serviceToken)\s*[:=]\s*[^\s,;]+/gi, "$1=[已隐藏]")
+    .replace(/(authorization|token|cookie|passToken|serviceToken|ssecurity|psecurity|nonce|pass_o|deviceId|userId|ua)\s*[:=]\s*[^\s,;]+/gi, "$1=[已隐藏]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [已隐藏]")
     .replace(/[A-Za-z0-9+/=_-]{48,}/g, "[已隐藏]");
 }
@@ -209,6 +222,17 @@ function getErrorMessage(error, fallback = "请求失败，请稍后重试") {
   return redact(error.message || error.error || error.detail || error);
 }
 
+async function awaitAll(tasks) {
+  const results = await Promise.allSettled(tasks);
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) {
+    throw failed.reason instanceof Error
+      ? failed.reason
+      : new Error(getErrorMessage(failed.reason));
+  }
+  return results.map((result) => result.value);
+}
+
 function applyTheme(context = {}) {
   if (typeof context.isDark === "boolean") {
     document.documentElement.dataset.theme = context.isDark ? "dark" : "light";
@@ -259,31 +283,31 @@ function navigate(view) {
   const [title, subtitle] = VIEW_META[view];
   setText("#page-title", title);
   setText("#page-subtitle", subtitle);
+  updateMappingDock();
   window.scrollTo({ top: 0, behavior: "smooth" });
-  loadView(view, false);
+  void loadView(view, false).catch((error) => {
+    showToast("页面刷新失败", getErrorMessage(error), "error");
+  });
 }
 
 async function loadView(view, force) {
-  try {
-    if (view === "overview") {
-      const tasks = [loadStatus()];
-      if (force || !state.loaded.devices) tasks.push(loadDevices(false));
-      if (force || !state.loaded.scenes) tasks.push(loadScenes(false));
-      if (force || !state.loaded.diagnostics) tasks.push(loadDiagnostics(false));
-      await Promise.allSettled(tasks);
-    } else if (view === "devices" && (force || !state.loaded.devices)) {
-      await loadDevices(false);
-    } else if (view === "scenes") {
-      const tasks = [];
-      if (force || !state.loaded.devices) tasks.push(loadDevices(false));
-      if (force || !state.loaded.scenes) tasks.push(loadScenes(false));
-      if (force || !state.loaded.tools) tasks.push(loadTools());
-      await Promise.allSettled(tasks);
-    } else if (view === "diagnostics" && (force || !state.loaded.diagnostics)) {
-      await loadDiagnostics(false);
-    }
-  } catch (error) {
-    showToast("页面刷新失败", getErrorMessage(error), "error");
+  if (view === "overview") {
+    const tasks = [loadStatus()];
+    if (force || !state.loaded.devices) tasks.push(loadDevices(false));
+    if (force || !state.loaded.scenes) tasks.push(loadScenes(false));
+    if (force || !state.loaded.diagnostics) tasks.push(loadDiagnostics(false));
+    await awaitAll(tasks);
+  } else if (view === "devices" && (force || !state.loaded.devices)) {
+    await loadDevices(false);
+  } else if (view === "scenes") {
+    const tasks = [];
+    if (force || !state.loaded.devices) tasks.push(loadDevices(false));
+    if (force || !state.loaded.scenes) tasks.push(loadScenes(false));
+    const toolsDirty = state.loaded.tools && serializedTools() !== state.originalTools;
+    if (force || !state.loaded.tools || !toolsDirty) tasks.push(loadTools());
+    await awaitAll(tasks);
+  } else if (view === "diagnostics" && (force || !state.loaded.diagnostics)) {
+    await loadDiagnostics(false);
   }
 }
 
@@ -294,7 +318,11 @@ function isLoggedIn(payload = state.status) {
       ? payload.account
       : payload;
   return bool(
-    account.logged_in ?? account.authenticated ?? account.api_available ?? account.available,
+    account.credential_present
+      ?? account.logged_in
+      ?? account.authenticated
+      ?? account.api_available
+      ?? account.available,
     false,
   );
 }
@@ -310,7 +338,9 @@ function isLoginRunning(payload = state.status) {
 }
 
 async function loadStatus() {
+  const generation = state.dataGeneration;
   const payload = await apiGet(ENDPOINTS.status);
+  if (generation !== state.dataGeneration) return state.status;
   state.status = payload && typeof payload === "object" ? payload : {};
   renderStatus();
   return state.status;
@@ -335,16 +365,28 @@ function renderStatus() {
   if (running) {
     setTopStatus("warning", "等待扫码");
     setText("#metric-account", "登录进行中");
+  } else if (loginError) {
+    setTopStatus("danger", "授权异常");
+    setText("#metric-account", loggedIn ? "凭证需检查" : "未授权");
   } else if (loggedIn) {
-    setTopStatus("success", "服务正常");
-    setText("#metric-account", "已授权");
+    setTopStatus("success", "凭证已保存");
+    setText("#metric-account", "已保存");
   } else {
-    setTopStatus(loginError ? "danger" : "warning", loginError ? "授权异常" : "未登录");
+    setTopStatus("warning", "未登录");
     setText("#metric-account", "未授权");
   }
 
-  setText("#metric-login-time", formatTime(account.last_login_at, loggedIn ? "授权有效" : "等待扫码登录"));
-  setText("#account-title", running ? "等待扫码确认" : loggedIn ? "账号已安全授权" : "尚未连接米家账号");
+  setText("#metric-login-time", formatTime(account.last_login_at, loggedIn ? "已保存凭证" : "等待扫码登录"));
+  setText(
+    "#account-title",
+    running
+      ? "等待扫码确认"
+      : loginError
+        ? "米家账号状态需要检查"
+        : loggedIn
+          ? "账号凭证已保存"
+          : "尚未连接米家账号",
+  );
   setText(
     "#account-description",
     loginError || (running
@@ -355,8 +397,8 @@ function renderStatus() {
   );
 
   const badge = $("#account-badge");
-  badge.className = `status-badge is-${running ? "warning" : loggedIn ? "success" : loginError ? "danger" : "neutral"}`;
-  badge.textContent = running ? "授权中" : loggedIn ? "已登录" : loginError ? "异常" : "未登录";
+  badge.className = `status-badge is-${running ? "warning" : loginError ? "danger" : loggedIn ? "success" : "neutral"}`;
+  badge.textContent = running ? "授权中" : loginError ? "异常" : loggedIn ? "凭证已保存" : "未登录";
 
   $("#hero-login").hidden = loggedIn && !running;
   $("#account-login").hidden = loggedIn && !running;
@@ -404,11 +446,23 @@ function renderAuthPayload(payload = {}) {
   const image = $("#auth-qr-image");
   const placeholder = $("#auth-qr-placeholder");
   const qrImage = normalizeQrImage(payload.qr_image || payload.qr_image_data || payload.qrcode);
+  const qrRevision = text(payload.qr_revision).trim();
+  const qrAvailable = bool(payload.qr_available, Boolean(qrImage));
   if (qrImage) {
     image.src = qrImage;
+    state.authQrRevision = qrRevision;
+    image.hidden = false;
+    placeholder.hidden = true;
+  } else if (
+    qrAvailable
+    && qrRevision
+    && qrRevision === state.authQrRevision
+    && image.getAttribute("src")
+  ) {
     image.hidden = false;
     placeholder.hidden = true;
   } else {
+    state.authQrRevision = "";
     image.removeAttribute("src");
     image.hidden = true;
     placeholder.hidden = false;
@@ -423,14 +477,18 @@ function renderAuthPayload(payload = {}) {
 }
 
 async function startLogin() {
+  const requestId = ++state.authRequestId;
+  clearAuthPoll();
   const buttons = [$("#hero-login"), $("#account-login")];
   buttons.forEach((button) => setButtonLoading(button, true));
   try {
     const payload = await apiPost(ENDPOINTS.authStart, {});
+    if (requestId !== state.authRequestId) return;
     renderAuthPayload(payload && typeof payload === "object" ? payload : {});
     showToast("登录流程已启动", "请使用米家 App 扫码并确认授权");
     scheduleAuthPoll(true);
   } catch (error) {
+    if (requestId !== state.authRequestId) return;
     showToast("无法启动登录", getErrorMessage(error), "error");
   } finally {
     buttons.forEach((button) => setButtonLoading(button, false));
@@ -444,12 +502,24 @@ function clearAuthPoll() {
 
 function scheduleAuthPoll(immediate = false) {
   clearAuthPoll();
-  state.authTimer = window.setTimeout(pollAuthStatus, immediate ? 300 : 1800);
+  const delay = immediate ? 300 : state.authQrRevision ? 3000 : 1800;
+  state.authTimer = window.setTimeout(pollAuthStatus, delay);
 }
 
 async function pollAuthStatus() {
+  const generation = state.dataGeneration;
+  const requestId = state.authRequestId;
   try {
-    const payload = await apiGet(ENDPOINTS.authStatus);
+    const payload = await apiGet(
+      ENDPOINTS.authStatus,
+      state.authQrRevision
+        ? { qr_revision: state.authQrRevision }
+        : {},
+    );
+    if (
+      generation !== state.dataGeneration
+      || requestId !== state.authRequestId
+    ) return;
     const auth = payload && typeof payload === "object" ? payload : {};
     renderAuthPayload(auth);
     state.status = {
@@ -464,7 +534,7 @@ async function pollAuthStatus() {
       clearAuthPoll();
       $("#auth-panel").hidden = true;
       showToast("米家账号登录成功", "现在可以同步设备与场景");
-      await Promise.allSettled([loadDevices(false), loadScenes(false)]);
+      await awaitAll([loadDevices(false), loadScenes(false)]);
       return;
     }
     if (auth.last_login_error || auth.error) {
@@ -474,6 +544,10 @@ async function pollAuthStatus() {
     }
     if (isLoginRunning(auth)) scheduleAuthPoll();
   } catch (error) {
+    if (
+      generation !== state.dataGeneration
+      || requestId !== state.authRequestId
+    ) return;
     clearAuthPoll();
     showToast("登录状态读取失败", getErrorMessage(error), "error");
   }
@@ -482,11 +556,10 @@ async function pollAuthStatus() {
 async function logout() {
   const confirmed = await openDialog({
     title: "退出米家账号？",
-    message: "这会清除插件保存的米家登录凭证与本地账号状态。设备映射配置不会被删除。",
+    message: "这会清除插件保存的米家登录凭证与本地账号状态，并保留设备映射配置。",
     summary: [
       "登录凭证将从插件数据目录移除",
       "需要重新扫码后才能同步设备与场景",
-      "此操作不会关闭或控制任何米家设备",
     ],
     confirmLabel: "确认退出并清除",
     danger: true,
@@ -496,17 +569,63 @@ async function logout() {
   const button = $("#account-logout");
   setButtonLoading(button, true);
   try {
-    await apiPost(ENDPOINTS.authLogout, { confirm: "退出登录" });
+    state.authRequestId += 1;
     clearAuthPoll();
+    await apiPost(ENDPOINTS.authLogout, { confirm: "退出登录" });
+    state.authQrRevision = "";
+    $("#auth-qr-image").removeAttribute("src");
+    $("#auth-qr-image").hidden = true;
+    $("#auth-qr-placeholder").hidden = false;
+    $("#auth-panel").hidden = true;
+    state.dataGeneration += 1;
+    state.configGeneration += 1;
+    state.deviceRequestId += 1;
+    state.toolRequestId += 1;
+    state.deviceLoading = false;
+    state.toolLoading = false;
     state.status = {};
     state.devices = [];
     state.scenes = [];
+    state.sceneCacheTime = "";
+    state.tools = {
+      enable_readonly_tool: false,
+      scene_tool: { enable: false, admin_only: true },
+      control_tool: { enable: false, admin_only: true, allowed_devices: [] },
+    };
+    state.originalTools = "";
+    state.toolRevision = "";
+    state.mappingRevision = "";
+    state.diagnostics = {};
+    state.loaded = {
+      devices: false,
+      scenes: false,
+      tools: false,
+      diagnostics: false,
+    };
     state.originalMappings.clear();
+    closeDeviceDetail();
     renderStatus();
     renderDevices();
     renderScenes();
+    renderTools();
+    renderDiagnostics();
+    renderOverviewMetrics();
     showToast("已退出米家账号", "本地登录凭证已清除");
-    await loadStatus();
+    try {
+      const reloads = [loadStatus()];
+      if (state.currentView === "overview") {
+        reloads.push(
+          loadDevices(false),
+          loadScenes(false),
+          loadDiagnostics(false),
+        );
+      } else {
+        reloads.push(loadView(state.currentView, false));
+      }
+      await awaitAll(reloads);
+    } catch (error) {
+      showToast("退出后的页面刷新失败", getErrorMessage(error), "error");
+    }
   } catch (error) {
     showToast("退出失败", getErrorMessage(error), "error");
   } finally {
@@ -600,17 +719,35 @@ function normalizeDevices(payload) {
 }
 
 async function loadDevices(sync = false) {
-  const payload = sync
-    ? await apiPost(ENDPOINTS.devicesSync, {})
-    : await apiGet(ENDPOINTS.devices);
-  const normalized = normalizeDevices(payload);
-  state.devices = normalized;
-  state.loaded.devices = true;
-  snapshotMappings();
-  renderDevices();
-  if (state.loaded.tools) renderControlAllowlist();
-  renderOverviewMetrics();
-  return normalized;
+  const generation = state.dataGeneration;
+  const configGeneration = state.configGeneration;
+  const requestId = ++state.deviceRequestId;
+  state.deviceLoading = true;
+  updateConfigEditingState();
+  try {
+    const payload = sync
+      ? await apiPost(ENDPOINTS.devicesSync, {})
+      : await apiGet(ENDPOINTS.devices);
+    if (
+      generation !== state.dataGeneration
+      || configGeneration !== state.configGeneration
+      || requestId !== state.deviceRequestId
+    ) return state.devices;
+    const normalized = normalizeDevices(payload);
+    state.devices = normalized;
+    state.mappingRevision = text(payload && payload.revision).trim();
+    state.loaded.devices = true;
+    snapshotMappings();
+    renderDevices();
+    if (state.loaded.tools) renderControlAllowlist();
+    renderOverviewMetrics();
+    return normalized;
+  } finally {
+    if (requestId === state.deviceRequestId) {
+      state.deviceLoading = false;
+      updateConfigEditingState();
+    }
+  }
 }
 
 function snapshotMappings() {
@@ -778,9 +915,71 @@ function updateDeviceValidation() {
 
 function updateMappingDock() {
   const changes = getMappingChanges();
+  const hasDuplicates = getDuplicateAliases().size > 0;
+  const visible = state.currentView === "devices" && changes.length > 0;
   const dock = $("#mapping-save-dock");
-  dock.hidden = changes.length === 0;
+  const topButton = $("#save-device-mappings");
+  dock.hidden = !visible;
+  topButton.hidden = !visible;
+  topButton.disabled = hasDuplicates
+    || state.mappingSaving
+    || state.toolSaving
+    || state.deviceLoading
+    || state.toolLoading;
   setText("#mapping-change-count", `${changes.length} 项待保存`);
+  setText("#save-device-mappings-label", `保存 ${changes.length}`);
+}
+
+function setMappingSaveLoading(loading) {
+  const buttons = [$("#review-mappings"), $("#save-device-mappings")];
+  buttons.forEach((button) => setButtonLoading(button, loading));
+  if (
+    !loading
+    && (
+      state.mappingSaving
+      || state.toolSaving
+      || state.deviceLoading
+      || state.toolLoading
+    )
+  ) {
+    buttons.forEach((button) => {
+      button.disabled = true;
+    });
+  }
+}
+
+function updateConfigEditingState() {
+  const disabled = state.mappingSaving
+    || state.toolSaving
+    || state.deviceLoading
+    || state.toolLoading;
+  $$("[data-device-alias], [data-device-category]").forEach((field) => {
+    field.disabled = disabled;
+  });
+  $("#reset-mappings").disabled = disabled;
+  $("#sync-devices").disabled = disabled;
+  $("#review-mappings").disabled = disabled;
+  [
+    "#tool-readonly",
+    "#tool-scenes",
+    "#tool-admin-only",
+    "#tool-control",
+    "#tool-control-admin-only",
+  ].forEach((selector) => {
+    $(selector).disabled = disabled;
+  });
+  $$("[data-control-alias]").forEach((input) => {
+    input.disabled = disabled;
+  });
+  $("#refresh-current").disabled = disabled;
+  if (!disabled) updateDeviceValidation();
+  updateMappingDock();
+  updateToolState();
+}
+
+function setMappingEditingDisabled(disabled) {
+  state.mappingSaving = Boolean(disabled);
+  updateConfigEditingState();
 }
 
 function mappingSummary(changes) {
@@ -829,17 +1028,45 @@ function formatServerMappingChanges(changes, fallback) {
   removed.forEach((item) => lines.push(
     `移除：${text(item.alias)}（DID ${text(item.did)}）`,
   ));
-  changed.forEach((item) => lines.push(
-    `修改：${text(item.alias)}，${text(item.before && item.before.category, "无类别")} → ${text(item.after && item.after.category, "无类别")}`,
-  ));
+  changed.forEach((item) => {
+    const beforeDid = text(item.before && item.before.did);
+    const afterDid = text(item.after && item.after.did);
+    const beforeCategory = text(item.before && item.before.category, "无类别");
+    const afterCategory = text(item.after && item.after.category, "无类别");
+    const details = [];
+    if (beforeDid !== afterDid) details.push(`DID ${beforeDid} → ${afterDid}`);
+    if (beforeCategory !== afterCategory) details.push(`类别 ${beforeCategory} → ${afterCategory}`);
+    lines.push(`修改：${text(item.alias)}，${details.join("；") || "配置已更新"}`);
+  });
   const preserved = Array.isArray(changes.preserved_orphan_categories)
     ? changes.preserved_orphan_categories
     : [];
   if (preserved.length) lines.push(`安全保留 ${preserved.length} 个旧版孤立类别项`);
+  const removedFromControl = Array.isArray(changes.control_allowlist_removed)
+    ? changes.control_allowlist_removed
+    : [];
+  if (removedFromControl.length) {
+    lines.push(`安全调整：${removedFromControl.join("、")} 将从设备控制白名单移除`);
+  }
   return lines.length ? lines : fallback;
 }
 
 async function reviewAndSaveMappings() {
+  if (!state.loaded.devices || !state.mappingRevision) {
+    showToast("设备配置尚未载入", "请先刷新设备管理页面", "error");
+    return;
+  }
+  if (
+    state.loaded.tools
+    && serializedTools() !== state.originalTools
+  ) {
+    showToast(
+      "请先处理 Tool 设置",
+      "Tool 设置有未保存修改，请先保存或刷新撤销后再保存设备映射",
+      "warning",
+    );
+    return;
+  }
   const duplicates = getDuplicateAliases();
   if (duplicates.size) {
     showToast("存在重复别名", `请修改：${Array.from(duplicates).join("、")}`, "error");
@@ -854,12 +1081,21 @@ async function reviewAndSaveMappings() {
     return;
   }
 
-  const button = $("#review-mappings");
-  setButtonLoading(button, true);
+  const mappings = collectMappings();
+  const baseRevision = state.mappingRevision;
+  state.configGeneration += 1;
+  setMappingEditingDisabled(true);
+  setMappingSaveLoading(true);
   try {
-    const mappings = collectMappings();
-    const preview = await apiPost(ENDPOINTS.deviceMappings, { mappings });
-    setButtonLoading(button, false);
+    const preview = await apiPost(ENDPOINTS.deviceMappings, {
+      mappings,
+      revision: baseRevision,
+    });
+    const previewRevision = text(preview && preview.revision).trim();
+    if (!previewRevision) {
+      throw new Error("后端未返回配置版本，请刷新后重试");
+    }
+    setMappingSaveLoading(false);
     const confirmed = await openDialog({
       title: "保存设备映射？",
       message: "以下修改已通过后端校验。确认后才会写入插件配置，聊天命令与只读 Tool 将使用新的映射。",
@@ -867,18 +1103,38 @@ async function reviewAndSaveMappings() {
       confirmLabel: "确认保存",
     });
     if (!confirmed) return;
-    setButtonLoading(button, true);
-    await apiPost(ENDPOINTS.deviceMappings, { mappings, confirm: true });
+    setMappingSaveLoading(true);
+    const saved = await apiPost(ENDPOINTS.deviceMappings, {
+      mappings,
+      revision: previewRevision,
+      confirm: true,
+    });
+    const nextMappingRevision = text(saved && saved.revision).trim();
+    const nextToolRevision = text(saved && saved.tool_revision).trim();
+    if (!nextMappingRevision || !nextToolRevision) {
+      throw new Error("后端未返回最新配置版本，请刷新后重试");
+    }
+    state.configGeneration += 1;
+    state.mappingRevision = nextMappingRevision;
     state.devices.forEach((device) => { device.alias = device.alias.trim(); });
     snapshotMappings();
     renderDevices();
     renderOverviewMetrics();
-    if (state.loaded.tools) renderControlAllowlist();
+    if (state.loaded.tools && saved && saved.control_tool) {
+      state.tools = {
+        ...state.tools,
+        control_tool: normalizeTools(saved).control_tool,
+      };
+      state.toolRevision = nextToolRevision;
+      state.originalTools = serializedTools();
+      renderTools();
+    }
     showToast("设备映射已保存", `共保留 ${mappings.length} 条映射`);
   } catch (error) {
     showToast("设备映射保存失败", getErrorMessage(error), "error");
   } finally {
-    setButtonLoading(button, false);
+    setMappingEditingDisabled(false);
+    setMappingSaveLoading(false);
   }
 }
 
@@ -921,6 +1177,7 @@ function findDevice(did) {
 }
 
 function closeDeviceDetail() {
+  state.drawerRequestId += 1;
   $("#device-detail-layer").hidden = true;
   document.body.style.overflow = "";
   if (state.drawerPreviousFocus && typeof state.drawerPreviousFocus.focus === "function") {
@@ -974,19 +1231,25 @@ async function showDeviceStatus(device) {
     showToast("请先配置设备别名", "只读状态接口仅允许访问已映射设备", "warning");
     return;
   }
+  const requestId = ++state.drawerRequestId;
   state.drawerPreviousFocus = document.activeElement;
   const layer = $("#device-detail-layer");
   layer.hidden = false;
   document.body.style.overflow = "hidden";
   setText("#device-detail-title", device.alias);
-  setText("#device-detail-subtitle", `${device.cloudName} · 仅读取，不会执行任何控制`);
+  setText("#device-detail-subtitle", `${device.cloudName} · 实时只读状态`);
   $("#device-detail-loading").hidden = false;
   $("#device-detail-content").hidden = true;
   $("#device-detail-error").hidden = true;
   $(".device-drawer .icon-button").focus();
 
+  const generation = state.dataGeneration;
   try {
     const payload = await apiGet(ENDPOINTS.deviceStatus, { alias: device.alias.trim() });
+    if (
+      generation !== state.dataGeneration
+      || requestId !== state.drawerRequestId
+    ) return;
     const root = payload && typeof payload === "object" ? payload : {};
     const entries = normalizeStateEntries(payload);
     const meta = $("#device-detail-meta");
@@ -1011,6 +1274,10 @@ async function showDeviceStatus(device) {
     $("#device-detail-loading").hidden = true;
     $("#device-detail-content").hidden = false;
   } catch (error) {
+    if (
+      generation !== state.dataGeneration
+      || requestId !== state.drawerRequestId
+    ) return;
     $("#device-detail-loading").hidden = true;
     $("#device-detail-error").hidden = false;
     setText("#device-detail-error-message", getErrorMessage(error, "无法读取设备状态，请稍后重试。"));
@@ -1036,9 +1303,11 @@ function normalizeScenes(payload) {
 }
 
 async function loadScenes(sync = false) {
+  const generation = state.dataGeneration;
   const payload = sync
     ? await apiPost(ENDPOINTS.scenesSync, {})
     : await apiGet(ENDPOINTS.scenes);
+  if (generation !== state.dataGeneration) return state.scenes;
   state.scenes = normalizeScenes(payload);
   state.loaded.scenes = true;
   renderScenes();
@@ -1069,7 +1338,7 @@ async function syncScenes() {
   setButtonLoading(button, true);
   try {
     await loadScenes(true);
-    showToast("场景目录已同步", `已缓存 ${state.scenes.length} 个场景；本页面没有执行任何场景`);
+    showToast("场景目录已同步", `已缓存 ${state.scenes.length} 个场景`);
   } catch (error) {
     showToast("场景同步失败", getErrorMessage(error), "error");
   } finally {
@@ -1114,12 +1383,30 @@ function serializedTools(tools = state.tools) {
 }
 
 async function loadTools() {
-  const payload = await apiGet(ENDPOINTS.tools);
-  state.tools = normalizeTools(payload);
-  state.loaded.tools = true;
-  state.originalTools = serializedTools();
-  renderTools();
-  return state.tools;
+  const generation = state.dataGeneration;
+  const configGeneration = state.configGeneration;
+  const requestId = ++state.toolRequestId;
+  state.toolLoading = true;
+  updateConfigEditingState();
+  try {
+    const payload = await apiGet(ENDPOINTS.tools);
+    if (
+      generation !== state.dataGeneration
+      || configGeneration !== state.configGeneration
+      || requestId !== state.toolRequestId
+    ) return state.tools;
+    state.tools = normalizeTools(payload);
+    state.toolRevision = text(payload && payload.revision).trim();
+    state.loaded.tools = true;
+    state.originalTools = serializedTools();
+    renderTools();
+    return state.tools;
+  } finally {
+    if (requestId === state.toolRequestId) {
+      state.toolLoading = false;
+      updateConfigEditingState();
+    }
+  }
 }
 
 function readToolsFromForm() {
@@ -1180,6 +1467,10 @@ function renderControlAllowlist() {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.checked = selected.has(alias);
+    input.disabled = state.mappingSaving
+      || state.toolSaving
+      || state.deviceLoading
+      || state.toolLoading;
     input.dataset.controlAlias = alias;
     const marker = createElement("span", "allowlist-check");
     const copy = createElement("span", "allowlist-name", alias);
@@ -1193,66 +1484,108 @@ function renderControlAllowlist() {
 }
 
 function updateToolState() {
-  const dirty = serializedTools() !== state.originalTools;
+  const dirty = state.loaded.tools && serializedTools() !== state.originalTools;
   const sceneRisky = state.tools.scene_tool.enable && !state.tools.scene_tool.admin_only;
   const controlRisky = state.tools.control_tool.enable && !state.tools.control_tool.admin_only;
-  $("#save-tools").disabled = !dirty;
+  $("#save-tools").disabled = !dirty
+    || state.mappingSaving
+    || state.toolSaving
+    || state.deviceLoading
+    || state.toolLoading;
   $("#tool-risk-note").hidden = !sceneRisky;
   $("#control-risk-note").hidden = !controlRisky;
   $("#control-allowlist-panel").classList.toggle("is-active", state.tools.control_tool.enable);
   setText("#control-allowlist-count", `${state.tools.control_tool.allowed_devices.length} 台`);
   const badge = $("#tool-save-state");
   badge.className = `status-badge is-${dirty ? "warning" : "neutral"}`;
-  badge.textContent = dirty ? "有未保存修改" : "已同步";
+  badge.textContent = !state.loaded.tools
+    ? "等待读取"
+    : dirty
+      ? "有未保存修改"
+      : "已保存";
+}
+
+function setToolEditingDisabled(disabled) {
+  state.toolSaving = Boolean(disabled);
+  updateConfigEditingState();
 }
 
 async function saveTools() {
-  const sceneRisky = state.tools.scene_tool.enable && !state.tools.scene_tool.admin_only;
-  const controlEnabled = state.tools.control_tool.enable;
-  const controlRisky = controlEnabled && !state.tools.control_tool.admin_only;
+  if (!state.loaded.tools || !state.toolRevision) {
+    showToast("Tool 设置尚未载入", "请先刷新场景 Tool 页面", "error");
+    return;
+  }
+  if (getMappingChanges().length) {
+    showToast(
+      "请先处理设备映射",
+      "设备映射有未保存修改，请先保存或刷新撤销后再保存 Tool 设置",
+      "warning",
+    );
+    return;
+  }
+  const submittedTools = JSON.parse(serializedTools());
+  const baseRevision = state.toolRevision;
+  const sceneRisky = submittedTools.scene_tool.enable
+    && !submittedTools.scene_tool.admin_only;
+  const controlEnabled = submittedTools.control_tool.enable;
+  const controlRisky = controlEnabled
+    && !submittedTools.control_tool.admin_only;
   const risky = sceneRisky || controlEnabled;
   const summary = [
-    `设备只读 Tool：${state.tools.enable_readonly_tool ? "开启" : "关闭"}`,
-    `场景 LLM Tool：${state.tools.scene_tool.enable ? "开启" : "关闭"}`,
-    `场景 Tool 权限：${state.tools.scene_tool.admin_only ? "仅管理员" : "所有可调用用户"}`,
+    `设备只读 Tool：${submittedTools.enable_readonly_tool ? "开启" : "关闭"}`,
+    `场景 LLM Tool：${submittedTools.scene_tool.enable ? "开启" : "关闭"}`,
+    `场景 Tool 权限：${submittedTools.scene_tool.admin_only ? "仅管理员" : "所有可调用用户"}`,
     `设备控制 Tool：${controlEnabled ? "开启" : "关闭"}`,
-    `设备控制权限：${state.tools.control_tool.admin_only ? "仅 AstrBot 管理员" : "所有可调用用户"}`,
-    `设备控制白名单：${state.tools.control_tool.allowed_devices.length
-      ? state.tools.control_tool.allowed_devices.join("、")
-      : "空（不会控制任何设备）"}`,
+    `设备控制权限：${submittedTools.control_tool.admin_only ? "仅 AstrBot 管理员" : "所有可调用用户"}`,
+    `设备控制白名单：${submittedTools.control_tool.allowed_devices.length
+      ? submittedTools.control_tool.allowed_devices.join("、")
+      : "未配置"}`,
   ];
   if (sceneRisky) summary.push("风险提示：当前场景 Tool 未限制为仅管理员调用");
   if (controlRisky) summary.push("高风险提示：当前设备控制 Tool 未限制为仅管理员调用");
 
-  const confirmed = await openDialog({
-    title: controlEnabled ? "确认启用设备控制 Tool？" : sceneRisky ? "确认开放场景 Tool？" : "保存 Tool 权限？",
-    message: controlEnabled
-      ? "设备控制 Tool 可以改变真实家居状态。请确认管理员权限和设备白名单均符合预期。"
-      : sceneRisky
-        ? "场景可能触发真实家居动作。允许普通用户调用会增加误操作风险，请再次确认。"
-      : "权限修改会立即影响大模型可以使用的米家能力。",
-    summary,
-    confirmLabel: risky ? "理解风险并保存" : "确认保存",
-    danger: risky,
-  });
-  if (!confirmed) return;
-
   const button = $("#save-tools");
-  setButtonLoading(button, true);
+  state.configGeneration += 1;
+  setToolEditingDisabled(true);
   try {
-    await apiPost(ENDPOINTS.tools, {
-      ...state.tools,
+    const confirmed = await openDialog({
+      title: controlEnabled ? "确认启用设备控制 Tool？" : sceneRisky ? "确认开放场景 Tool？" : "保存 Tool 权限？",
+      message: controlEnabled
+        ? "设备控制 Tool 可以改变真实家居状态。请确认管理员权限和设备白名单均符合预期。"
+        : sceneRisky
+          ? "场景可能触发真实家居动作。允许普通用户调用会增加误操作风险，请再次确认。"
+          : "权限修改会立即影响大模型可以使用的米家能力。",
+      summary,
+      confirmLabel: risky ? "理解风险并保存" : "确认保存",
+      danger: risky,
+    });
+    if (!confirmed) return;
+
+    setButtonLoading(button, true);
+    const saved = await apiPost(ENDPOINTS.tools, {
+      ...submittedTools,
+      revision: baseRevision,
       ...(sceneRisky ? { confirm_public_scene_tool: true } : {}),
       ...(controlEnabled ? { confirm_control_tool: true } : {}),
       ...(controlRisky ? { confirm_public_control_tool: true } : {}),
     });
+    const nextToolRevision = text(saved && saved.revision).trim();
+    const nextMappingRevision = text(saved && saved.mapping_revision).trim();
+    if (!nextToolRevision || !nextMappingRevision) {
+      throw new Error("后端未返回最新配置版本，请刷新后重试");
+    }
+    state.configGeneration += 1;
+    state.tools = normalizeTools(saved);
+    state.toolRevision = nextToolRevision;
+    state.mappingRevision = nextMappingRevision;
     state.originalTools = serializedTools();
-    updateToolState();
-    showToast("Tool 权限已保存", "新的权限设置已生效");
+    renderTools();
+    showToast("Tool 权限已保存", "新的权限设置已写入插件配置并生效");
   } catch (error) {
     showToast("Tool 权限保存失败", getErrorMessage(error), "error");
   } finally {
     setButtonLoading(button, false);
+    setToolEditingDisabled(false);
   }
 }
 
@@ -1266,8 +1599,12 @@ function defaultChecks() {
     {
       key: "account",
       title: "米家账号",
-      status: isLoggedIn() ? "ok" : account.last_login_error ? "error" : "warn",
-      message: isLoggedIn() ? "登录凭证当前可用" : redact(account.last_login_error || "尚未完成扫码授权"),
+      status: account.last_login_error ? "error" : isLoggedIn() ? "ok" : "warn",
+      message: account.last_login_error
+        ? redact(account.last_login_error)
+        : isLoggedIn()
+          ? "已检测到登录凭证"
+          : "尚未完成扫码授权",
       icon: "cloud",
     },
     {
@@ -1371,9 +1708,11 @@ function normalizeDiagnostics(payload) {
 }
 
 async function loadDiagnostics(run = false) {
+  const generation = state.dataGeneration;
   const payload = run
     ? await apiPost(ENDPOINTS.diagnosticsCheck, {})
     : await apiGet(ENDPOINTS.diagnostics);
+  if (generation !== state.dataGeneration) return state.diagnostics;
   state.diagnostics = normalizeDiagnostics(payload);
   state.loaded.diagnostics = true;
   renderDiagnostics();
@@ -1500,6 +1839,7 @@ function bindEvents() {
   $("#sync-devices").addEventListener("click", syncDevices);
   $("#sync-scenes").addEventListener("click", syncScenes);
   $("#review-mappings").addEventListener("click", reviewAndSaveMappings);
+  $("#save-device-mappings").addEventListener("click", reviewAndSaveMappings);
   $("#reset-mappings").addEventListener("click", resetMappings);
   $("#save-tools").addEventListener("click", saveTools);
   $("#run-diagnostics").addEventListener("click", runDiagnostics);
@@ -1546,7 +1886,10 @@ function bindEvents() {
 
   $("#refresh-current").addEventListener("click", async () => {
     const button = $("#refresh-current");
-    if (state.currentView === "devices" && getMappingChanges().length) {
+    const refreshesMappings = ["overview", "devices", "scenes"].includes(
+      state.currentView,
+    );
+    if (refreshesMappings && getMappingChanges().length) {
       const discard = await openDialog({
         title: "放弃未保存的设备修改？",
         message: "刷新会重新读取后端配置，当前尚未保存的别名与类别修改将被丢弃。",
@@ -1556,7 +1899,12 @@ function bindEvents() {
       });
       if (!discard) return;
     }
-    if (state.currentView === "scenes" && serializedTools() !== state.originalTools) {
+    if (
+      state.currentView === "scenes"
+      &&
+      state.loaded.tools
+      && serializedTools() !== state.originalTools
+    ) {
       const discard = await openDialog({
         title: "放弃未保存的权限修改？",
         message: "刷新会重新读取 Tool 权限，当前修改将被丢弃。",
@@ -1574,7 +1922,10 @@ function bindEvents() {
       showToast("刷新失败", getErrorMessage(error), "error");
     } finally {
       button.classList.remove("is-loading");
-      button.disabled = false;
+      button.disabled = state.mappingSaving
+        || state.toolSaving
+        || state.deviceLoading
+        || state.toolLoading;
     }
   });
 }
@@ -1599,11 +1950,10 @@ async function initialize() {
       bridge.onContext((context) => applyTheme(context || {}));
     }
     setConnection(true, "已连接 AstrBot");
-    await Promise.allSettled([
+    await awaitAll([
       loadStatus(),
       loadDevices(false),
       loadScenes(false),
-      loadTools(),
       loadDiagnostics(false),
     ]);
     renderOverviewMetrics();

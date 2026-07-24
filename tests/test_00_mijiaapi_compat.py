@@ -58,6 +58,10 @@ class MijiaAPI413CompatibilityTests(unittest.TestCase):
         client_source = (ROOT / "mihome_client.py").read_text(encoding="utf-8")
         self.assertNotIn("self.api.login(", client_source)
         self.assertNotIn('getattr(self.api, "device_list"', client_source)
+        self.assertNotRegex(
+            client_source,
+            r"wait_for\(\s*asyncio\.to_thread",
+        )
 
     def test_current_rw_shape_is_supported(self):
         prop = self.dev_prop_class(
