@@ -11,6 +11,9 @@ from typing import Dict, Any
 
 from astrbot.api import logger
 
+_CORRUPT_STATE_BACKUP_LIMIT = 5
+_FILE_COMPARE_CHUNK_SIZE = 64 * 1024
+
 try:
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path
     BASE_PATH = Path(get_astrbot_data_path())
@@ -145,21 +148,117 @@ class MiHomeDataManager:
                 self._state_corrupt = True
                 return {}
 
+    def _state_backup_paths(self) -> list[Path]:
+        prefix = f"{self.state_path.name}.corrupt-"
+        return sorted(
+            (
+                path
+                for path in self.data_dir.glob(f"{prefix}*")
+                if path.parent == self.data_dir
+            ),
+            key=lambda path: self._state_backup_order(path, prefix),
+        )
+
+    @staticmethod
+    def _state_backup_order(path: Path, prefix: str) -> tuple[int, str]:
+        try:
+            timestamp = int(path.name.removeprefix(prefix))
+        except ValueError:
+            try:
+                timestamp = path.stat().st_mtime_ns
+            except OSError:
+                timestamp = 0
+        return timestamp, path.name
+
+    @staticmethod
+    def _files_have_same_content(first: Path, second: Path) -> bool:
+        if (
+            MiHomeDataManager._is_link_or_reparse_point(first)
+            or MiHomeDataManager._is_link_or_reparse_point(second)
+        ):
+            return False
+        try:
+            if (
+                not first.is_file()
+                or not second.is_file()
+                or first.stat().st_size != second.stat().st_size
+            ):
+                return False
+            with first.open("rb") as first_file, second.open("rb") as second_file:
+                while True:
+                    first_chunk = first_file.read(_FILE_COMPARE_CHUNK_SIZE)
+                    second_chunk = second_file.read(_FILE_COMPARE_CHUNK_SIZE)
+                    if first_chunk != second_chunk:
+                        return False
+                    if not first_chunk:
+                        return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _remove_state_backup(path: Path) -> bool:
+        try:
+            path.unlink()
+            return True
+        except OSError as exc:
+            logger.error(
+                "[MiHome] 损坏状态备份清理失败: "
+                f"{type(exc).__name__}"
+            )
+            return False
+
+    def _prune_state_backups(self, preserve: Path | None = None) -> None:
+        backups = self._state_backup_paths()
+        excess = len(backups) - _CORRUPT_STATE_BACKUP_LIMIT
+        if excess <= 0:
+            return
+        for backup_path in backups:
+            if excess <= 0:
+                break
+            if preserve is not None and backup_path == preserve:
+                continue
+            if self._remove_state_backup(backup_path):
+                excess -= 1
+
+    def _backup_corrupt_state(self) -> None:
+        self._prune_state_backups()
+        backups = self._state_backup_paths()
+        matching_backups = [
+            path
+            for path in backups
+            if self._files_have_same_content(self.state_path, path)
+        ]
+        if matching_backups:
+            preserved_backup = matching_backups[-1]
+            for duplicate_path in matching_backups[:-1]:
+                self._remove_state_backup(duplicate_path)
+            if not self._harden_path(
+                preserved_backup,
+                0o600,
+                "损坏状态备份",
+            ):
+                raise PermissionError("损坏状态备份权限加固失败")
+            self._prune_state_backups(preserve=preserved_backup)
+            return
+
+        backup_path = self.state_path.with_name(
+            f"{self.state_path.name}.corrupt-{time.time_ns()}"
+        )
+        shutil.copy2(self.state_path, backup_path)
+        if not self._harden_path(
+            backup_path,
+            0o600,
+            "损坏状态备份",
+        ):
+            raise PermissionError("损坏状态备份权限加固失败")
+        self._prune_state_backups(preserve=backup_path)
+
     def save_state(self, state: Dict[str, Any]) -> bool:
         with self._state_lock:
             temp_path = None
             try:
                 if self._state_corrupt and self.state_path.exists():
-                    backup_path = self.state_path.with_name(
-                        f"{self.state_path.name}.corrupt-{time.time_ns()}"
-                    )
-                    shutil.copy2(self.state_path, backup_path)
-                    if not self._harden_path(
-                        backup_path,
-                        0o600,
-                        "损坏状态备份",
-                    ):
-                        raise PermissionError("损坏状态备份权限加固失败")
+                    self._backup_corrupt_state()
 
                 with tempfile.NamedTemporaryFile(
                     mode="w",
@@ -198,5 +297,13 @@ class MiHomeDataManager:
     def update_state(self, **kwargs) -> bool:
         with self._state_lock:
             state = self.load_state()
+            if (
+                not self._state_corrupt
+                and all(
+                    key in state and state[key] == value
+                    for key, value in kwargs.items()
+                )
+            ):
+                return True
             state.update(kwargs)
             return self.save_state(state)

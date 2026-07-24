@@ -101,6 +101,10 @@ def load_mihome_client_module():
     ):
         setattr(mijia_module, name, type(name, (Exception,), {}))
     sys.modules["mijiaAPI"] = mijia_module
+    devices_module = types.ModuleType("mijiaAPI.devices")
+    devices_module.DevAction = type("DevAction", (), {})
+    devices_module.DevProp = type("DevProp", (), {})
+    sys.modules["mijiaAPI.devices"] = devices_module
 
     module_name = f"{package_name}.mihome_client"
     spec = importlib.util.spec_from_file_location(
@@ -131,12 +135,26 @@ class _FailingConfig(_Config):
 class _DataManager:
     def __init__(self, state=None):
         self.state = state or {}
+        self.load_count = 0
 
     def load_state(self):
+        self.load_count += 1
         return dict(self.state)
 
 
 class _Client:
+    async def get_login_status(self, state=None):
+        state = state or {}
+        return {
+            "auth_exists": False,
+            "last_login_at": state.get("last_login_at", ""),
+            "last_login_error": state.get("last_login_error", ""),
+            "scene_cache_updated_at": state.get(
+                "scene_cache_updated_at",
+                "",
+            ),
+        }
+
     async def terminate(self):
         return None
 
@@ -363,6 +381,55 @@ class WebAPIBehaviorTests(unittest.TestCase):
         self.assertNotIn("pass-secret", redacted)
         self.assertIn("已隐藏", redacted)
 
+    def test_cached_device_rows_reuses_one_state_snapshot(self):
+        api, plugin = self.build_api(
+            state={
+                "did_to_name": {"did-1": "客厅灯"},
+                "did_to_model": {"did-1": "example.light.v1"},
+            }
+        )
+
+        rows = api._cached_device_rows()
+
+        self.assertEqual(plugin.data_manager.load_count, 1)
+        self.assertEqual(rows[0]["did"], "did-1")
+        self.assertEqual(rows[0]["name"], "客厅灯")
+
+    def test_status_endpoint_reuses_one_state_snapshot(self):
+        api, plugin = self.build_api(
+            state={
+                "did_to_name": {"did-1": "客厅灯"},
+                "did_to_model": {"did-1": "example.light.v1"},
+                "scenes": [],
+            }
+        )
+
+        response = asyncio.run(api.get_status())
+
+        self.assertTrue(response["payload"]["ok"])
+        self.assertEqual(plugin.data_manager.load_count, 1)
+
+    def test_device_snapshot_discards_unused_upstream_fields(self):
+        snapshot = self.web.MiHomeWebAPI._compact_device_snapshot(
+            [
+                {
+                    "did": "did-1",
+                    "name": "客厅灯",
+                    "model": "example.light.v1",
+                    "isOnline": True,
+                    "is_shared": True,
+                    "token": "must-not-be-kept",
+                    "large_payload": "x" * 1000,
+                }
+            ]
+        )
+
+        self.assertEqual(
+            set(snapshot[0]),
+            {"did", "name", "model", "isOnline", "isShared"},
+        )
+        self.assertTrue(snapshot[0]["isShared"])
+
     def test_login_payload_hides_raw_url_and_blocks_parallel_operations(self):
         api, _plugin = self.build_api()
 
@@ -372,6 +439,7 @@ class WebAPIBehaviorTests(unittest.TestCase):
             api._login_qr_url = "https://account.xiaomi.com/pass/qr/login?ticket=secret"
             api._login_qr_image = "data:image/svg+xml;base64,PHN2Zy8+"
             api._login_qr_created_at = self.web.time.monotonic()
+            api._login_qr_revision = "7"
             try:
                 payload = api._login_status_payload()
                 self.assertNotIn("qr_url", payload)
@@ -379,6 +447,12 @@ class WebAPIBehaviorTests(unittest.TestCase):
                     payload["qr_image"],
                     "data:image/svg+xml;base64,PHN2Zy8+",
                 )
+                self.assertTrue(payload["qr_available"])
+                self.assertEqual(payload["qr_revision"], "7")
+                cached_payload = api._login_status_payload("7")
+                self.assertEqual(cached_payload["qr_image"], "")
+                self.assertTrue(cached_payload["qr_available"])
+                self.assertEqual(cached_payload["qr_revision"], "7")
                 with self.assertRaises(self.web.WebAPIError) as raised:
                     api._ensure_operation_available()
                 self.assertEqual(raised.exception.status_code, 409)
@@ -732,11 +806,17 @@ class WebUIStaticContractTests(unittest.TestCase):
         self.assertIn("_build_qr_data_uri", backend)
         self.assertIn("SvgPathFillImage", backend)
         self.assertIn('"qr_image": qr_image', backend)
+        self.assertIn('"qr_available": qr_available', backend)
+        self.assertIn("known_qr_revision != qr_revision", backend)
         self.assertNotIn('"qr_url": qr_url', backend)
         self.assertIn("self._extract_qr_url_from_buffer(raw)", client)
         self.assertIn("[米家登录输出已隐藏]", client)
         self.assertRegex(requirements, r"(?m)^qrcode==8\.2$")
         self.assertIn("svg\\+xml", script)
+        self.assertIn("state.authQrRevision", script)
+        self.assertIn("qr_revision: state.authQrRevision", script)
+        self.assertIn("requestId !== state.authRequestId", script)
+        self.assertIn("requestId !== state.drawerRequestId", script)
         self.assertNotIn("normalizeAuthUrl", script)
         self.assertNotIn("auth-link", script)
         self.assertNotRegex(
@@ -803,7 +883,7 @@ class WebUIStaticContractTests(unittest.TestCase):
         changelog = CHANGELOG_PATH.read_text(encoding="utf-8")
         self.assertRegex(
             changelog,
-            re.compile(r"^## \[v8\.0\.1\] - 2026-07-24$", re.MULTILINE),
+            re.compile(r"^## \[v8\.1\.0\] - 2026-07-24$", re.MULTILINE),
         )
 
         tree = ast.parse(MAIN_PATH.read_text(encoding="utf-8"))

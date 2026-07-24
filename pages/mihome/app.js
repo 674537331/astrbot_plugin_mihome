@@ -102,6 +102,9 @@ const state = {
     diagnostics: false,
   },
   authTimer: null,
+  authRequestId: 0,
+  authQrRevision: "",
+  drawerRequestId: 0,
   dialogResolver: null,
   previousFocus: null,
   drawerPreviousFocus: null,
@@ -443,11 +446,23 @@ function renderAuthPayload(payload = {}) {
   const image = $("#auth-qr-image");
   const placeholder = $("#auth-qr-placeholder");
   const qrImage = normalizeQrImage(payload.qr_image || payload.qr_image_data || payload.qrcode);
+  const qrRevision = text(payload.qr_revision).trim();
+  const qrAvailable = bool(payload.qr_available, Boolean(qrImage));
   if (qrImage) {
     image.src = qrImage;
+    state.authQrRevision = qrRevision;
+    image.hidden = false;
+    placeholder.hidden = true;
+  } else if (
+    qrAvailable
+    && qrRevision
+    && qrRevision === state.authQrRevision
+    && image.getAttribute("src")
+  ) {
     image.hidden = false;
     placeholder.hidden = true;
   } else {
+    state.authQrRevision = "";
     image.removeAttribute("src");
     image.hidden = true;
     placeholder.hidden = false;
@@ -462,14 +477,18 @@ function renderAuthPayload(payload = {}) {
 }
 
 async function startLogin() {
+  const requestId = ++state.authRequestId;
+  clearAuthPoll();
   const buttons = [$("#hero-login"), $("#account-login")];
   buttons.forEach((button) => setButtonLoading(button, true));
   try {
     const payload = await apiPost(ENDPOINTS.authStart, {});
+    if (requestId !== state.authRequestId) return;
     renderAuthPayload(payload && typeof payload === "object" ? payload : {});
     showToast("登录流程已启动", "请使用米家 App 扫码并确认授权");
     scheduleAuthPoll(true);
   } catch (error) {
+    if (requestId !== state.authRequestId) return;
     showToast("无法启动登录", getErrorMessage(error), "error");
   } finally {
     buttons.forEach((button) => setButtonLoading(button, false));
@@ -483,14 +502,24 @@ function clearAuthPoll() {
 
 function scheduleAuthPoll(immediate = false) {
   clearAuthPoll();
-  state.authTimer = window.setTimeout(pollAuthStatus, immediate ? 300 : 1800);
+  const delay = immediate ? 300 : state.authQrRevision ? 3000 : 1800;
+  state.authTimer = window.setTimeout(pollAuthStatus, delay);
 }
 
 async function pollAuthStatus() {
   const generation = state.dataGeneration;
+  const requestId = state.authRequestId;
   try {
-    const payload = await apiGet(ENDPOINTS.authStatus);
-    if (generation !== state.dataGeneration) return;
+    const payload = await apiGet(
+      ENDPOINTS.authStatus,
+      state.authQrRevision
+        ? { qr_revision: state.authQrRevision }
+        : {},
+    );
+    if (
+      generation !== state.dataGeneration
+      || requestId !== state.authRequestId
+    ) return;
     const auth = payload && typeof payload === "object" ? payload : {};
     renderAuthPayload(auth);
     state.status = {
@@ -515,6 +544,10 @@ async function pollAuthStatus() {
     }
     if (isLoginRunning(auth)) scheduleAuthPoll();
   } catch (error) {
+    if (
+      generation !== state.dataGeneration
+      || requestId !== state.authRequestId
+    ) return;
     clearAuthPoll();
     showToast("登录状态读取失败", getErrorMessage(error), "error");
   }
@@ -536,8 +569,14 @@ async function logout() {
   const button = $("#account-logout");
   setButtonLoading(button, true);
   try {
-    await apiPost(ENDPOINTS.authLogout, { confirm: "退出登录" });
+    state.authRequestId += 1;
     clearAuthPoll();
+    await apiPost(ENDPOINTS.authLogout, { confirm: "退出登录" });
+    state.authQrRevision = "";
+    $("#auth-qr-image").removeAttribute("src");
+    $("#auth-qr-image").hidden = true;
+    $("#auth-qr-placeholder").hidden = false;
+    $("#auth-panel").hidden = true;
     state.dataGeneration += 1;
     state.configGeneration += 1;
     state.deviceRequestId += 1;
@@ -1138,6 +1177,7 @@ function findDevice(did) {
 }
 
 function closeDeviceDetail() {
+  state.drawerRequestId += 1;
   $("#device-detail-layer").hidden = true;
   document.body.style.overflow = "";
   if (state.drawerPreviousFocus && typeof state.drawerPreviousFocus.focus === "function") {
@@ -1191,6 +1231,7 @@ async function showDeviceStatus(device) {
     showToast("请先配置设备别名", "只读状态接口仅允许访问已映射设备", "warning");
     return;
   }
+  const requestId = ++state.drawerRequestId;
   state.drawerPreviousFocus = document.activeElement;
   const layer = $("#device-detail-layer");
   layer.hidden = false;
@@ -1205,7 +1246,10 @@ async function showDeviceStatus(device) {
   const generation = state.dataGeneration;
   try {
     const payload = await apiGet(ENDPOINTS.deviceStatus, { alias: device.alias.trim() });
-    if (generation !== state.dataGeneration) return;
+    if (
+      generation !== state.dataGeneration
+      || requestId !== state.drawerRequestId
+    ) return;
     const root = payload && typeof payload === "object" ? payload : {};
     const entries = normalizeStateEntries(payload);
     const meta = $("#device-detail-meta");
@@ -1230,7 +1274,10 @@ async function showDeviceStatus(device) {
     $("#device-detail-loading").hidden = true;
     $("#device-detail-content").hidden = false;
   } catch (error) {
-    if (generation !== state.dataGeneration) return;
+    if (
+      generation !== state.dataGeneration
+      || requestId !== state.drawerRequestId
+    ) return;
     $("#device-detail-loading").hidden = true;
     $("#device-detail-error").hidden = false;
     setText("#device-detail-error-message", getErrorMessage(error, "无法读取设备状态，请稍后重试。"));
@@ -1907,7 +1954,6 @@ async function initialize() {
       loadStatus(),
       loadDevices(false),
       loadScenes(false),
-      loadTools(),
       loadDiagnostics(false),
     ]);
     renderOverviewMetrics();

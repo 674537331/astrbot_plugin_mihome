@@ -105,7 +105,7 @@ READONLY_ALLOWED_CATEGORIES = {
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.0.1")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.1.0")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -275,23 +275,41 @@ class MiHomeControlPlugin(Star):
     def _readonly_tool_enabled(self) -> bool:
         return bool(self.config.get("enable_readonly_tool", False))
 
-    def _get_cloud_name_by_did(self, did: str) -> str:
-        state = self.data_manager.load_state()
+    def _get_cloud_name_by_did(
+        self,
+        did: str,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if state is None:
+            state = self.data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
         return str(did_to_name.get(did, "")).strip()
 
-    def _get_model_by_did(self, did: str) -> str:
-        state = self.data_manager.load_state()
+    def _get_model_by_did(
+        self,
+        did: str,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if state is None:
+            state = self.data_manager.load_state()
         did_to_model = state.get("did_to_model", {})
         return str(did_to_model.get(did, "")).strip()
 
-    def _get_cached_scenes(self) -> List[Dict[str, Any]]:
-        state = self.data_manager.load_state()
+    def _get_cached_scenes(
+        self,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        if state is None:
+            state = self.data_manager.load_state()
         scenes = state.get("scenes", [])
         return scenes if isinstance(scenes, list) else []
 
-    def _get_scene_cache_updated_at(self) -> str:
-        state = self.data_manager.load_state()
+    def _get_scene_cache_updated_at(
+        self,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if state is None:
+            state = self.data_manager.load_state()
         return str(state.get("scene_cache_updated_at", "")).strip()
 
     def _format_scene_line(
@@ -309,11 +327,18 @@ class MiHomeControlPlugin(Star):
             line += f"  (家庭: {home_name})"
         return line
 
-    def _format_alias_line(self, idx: int, alias: str, did: str, category_map: Dict[str, str]) -> str:
+    def _format_alias_line(
+        self,
+        idx: int,
+        alias: str,
+        did: str,
+        category_map: Dict[str, str],
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
         configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
-        model = self._get_model_by_did(did)
+        model = self._get_model_by_did(did, state)
         effective_category = resolve_effective_category(model=model, category=configured_category)
-        cloud_name = self._get_cloud_name_by_did(did)
+        cloud_name = self._get_cloud_name_by_did(did, state)
 
         parts = [f"{idx}. {alias}"]
         if cloud_name and cloud_name != alias:
@@ -372,6 +397,7 @@ class MiHomeControlPlugin(Star):
     async def _render_readonly_status_by_alias(self, alias: str) -> str:
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
+        state = self.data_manager.load_state()
 
         alias = str(alias or "").strip()
         if not alias:
@@ -385,9 +411,9 @@ class MiHomeControlPlugin(Star):
 
         did = device_map[alias]
         configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
-        model = self._get_model_by_did(did)
+        model = self._get_model_by_did(did, state)
         effective_category = resolve_effective_category(model=model, category=configured_category)
-        cloud_name = self._get_cloud_name_by_did(did)
+        cloud_name = self._get_cloud_name_by_did(did, state)
 
         if effective_category == CATEGORY_NONE:
             return (
@@ -648,6 +674,7 @@ class MiHomeControlPlugin(Star):
         """查看指定米家设备的能力与实时状态"""
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
+        state = self.data_manager.load_state()
 
         msg = event.message_str.strip()
         cmd_prefix = r"^/?米家详情\s*"
@@ -673,11 +700,11 @@ class MiHomeControlPlugin(Star):
 
         did = device_map[alias]
         configured_category = normalize_category(category_map.get(alias, CATEGORY_NONE))
-        model = self._get_model_by_did(did)
+        model = self._get_model_by_did(did, state)
         model_hit = has_model_profile(model)
         hidden_props = set(get_model_hidden_props(model))
         category = resolve_effective_category(model=model, category=configured_category)
-        cloud_name = self._get_cloud_name_by_did(did)
+        cloud_name = self._get_cloud_name_by_did(did, state)
 
         if category == CATEGORY_NONE:
             yield event.plain_result(f"⏳ 正在探测【{alias}】的能力菜单...")
@@ -1229,6 +1256,7 @@ class MiHomeControlPlugin(Star):
 
         device_map = self._parse_device_map()
         category_map = self._parse_category_map()
+        state = self.data_manager.load_state()
 
         if not device_map:
             return "当前没有已配置的米家设备别名，请先在插件配置的 device_map 中添加别名。"
@@ -1236,7 +1264,15 @@ class MiHomeControlPlugin(Star):
         lines = [f"当前已配置 {len(device_map)} 个米家设备别名："]
         for idx, alias in enumerate(sorted(device_map.keys()), 1):
             did = device_map[alias]
-            lines.append(self._format_alias_line(idx, alias, did, category_map))
+            lines.append(
+                self._format_alias_line(
+                    idx,
+                    alias,
+                    did,
+                    category_map,
+                    state,
+                )
+            )
 
         lines.append("")
         lines.append("说明：只读查询工具只能从以上别名中检索设备。")
@@ -1295,8 +1331,9 @@ class MiHomeControlPlugin(Star):
         if deny_msg:
             return deny_msg
 
-        scenes = self._get_cached_scenes()
-        updated_at = self._get_scene_cache_updated_at()
+        state = self.data_manager.load_state()
+        scenes = self._get_cached_scenes(state)
+        updated_at = self._get_scene_cache_updated_at(state)
 
         if not scenes:
             return "当前没有已缓存的米家场景列表，请先手动执行 /米家场景列表 同步场景。"

@@ -227,6 +227,8 @@ class MiHomeWebAPI:
         self._login_qr_image = ""
         self._login_started_at = ""
         self._login_qr_created_at = 0.0
+        self._login_qr_generation = 0
+        self._login_qr_revision = ""
         self._login_result: dict[str, Any] = {
             "status": "idle",
             "message": "尚未开始登录",
@@ -241,6 +243,7 @@ class MiHomeWebAPI:
         self._login_qr_url = ""
         self._login_qr_image = ""
         self._login_qr_created_at = 0.0
+        self._login_qr_revision = ""
         self._login_started_at = ""
         self._login_result = {
             "status": "idle",
@@ -367,6 +370,7 @@ class MiHomeWebAPI:
         self._login_qr_url = ""
         self._login_qr_image = ""
         self._login_qr_created_at = 0.0
+        self._login_qr_revision = ""
         self._login_started_at = ""
         self._login_result = {
             "status": "idle",
@@ -488,11 +492,15 @@ class MiHomeWebAPI:
         errors = [item for item in (device_error, category_error) if item]
         return device_map, category_map, errors
 
-    def _cached_device_rows(self) -> list[dict[str, Any]]:
+    def _cached_device_rows(
+        self,
+        state: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         if self._device_snapshot:
-            return self._build_device_rows(self._device_snapshot)
+            return self._build_device_rows(self._device_snapshot, state)
 
-        state = self._data_manager.load_state()
+        if state is None:
+            state = self._data_manager.load_state()
         did_to_name = state.get("did_to_name", {})
         did_to_model = state.get("did_to_model", {})
         if not isinstance(did_to_name, dict):
@@ -513,9 +521,13 @@ class MiHomeWebAPI:
                     "isOnline": None,
                 }
             )
-        return self._build_device_rows(cached)
+        return self._build_device_rows(cached, state)
 
-    def _build_device_rows(self, devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _build_device_rows(
+        self,
+        devices: list[dict[str, Any]],
+        state: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         device_map, category_map, _ = self._mapping_snapshot()
         aliases_by_did: dict[str, list[str]] = {}
         for alias, did in device_map.items():
@@ -523,7 +535,8 @@ class MiHomeWebAPI:
 
         rows: list[dict[str, Any]] = []
         seen_dids: set[str] = set()
-        state = self._data_manager.load_state()
+        if state is None:
+            state = self._data_manager.load_state()
         cached_names = state.get("did_to_name", {})
         cached_models = state.get("did_to_model", {})
         if not isinstance(cached_names, dict):
@@ -620,8 +633,34 @@ class MiHomeWebAPI:
         rows.sort(key=lambda row: (not row["configured"], row["name"], row["did"]))
         return rows
 
-    def _sanitized_scenes(self) -> list[dict[str, str]]:
-        state = self._data_manager.load_state()
+    @staticmethod
+    def _compact_device_snapshot(
+        devices: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        snapshot = []
+        for item in devices:
+            if not isinstance(item, dict):
+                continue
+            snapshot.append(
+                {
+                    "did": item.get("did"),
+                    "name": item.get("name"),
+                    "model": item.get("model"),
+                    "isOnline": item.get("isOnline"),
+                    "isShared": item.get(
+                        "isShared",
+                        item.get("is_shared", item.get("shared")),
+                    ),
+                }
+            )
+        return snapshot
+
+    def _sanitized_scenes(
+        self,
+        state: dict[str, Any] | None = None,
+    ) -> list[dict[str, str]]:
+        if state is None:
+            state = self._data_manager.load_state()
         scenes = state.get("scenes", [])
         if not isinstance(scenes, list):
             return []
@@ -704,11 +743,12 @@ class MiHomeWebAPI:
     # ------------------------------------------------------------------
 
     async def get_status(self):
-        login = await self._client.get_login_status()
+        state = self._data_manager.load_state()
+        login = await self._client.get_login_status(state)
         credential_present = bool(login.get("auth_exists"))
         login_error = _redact_text(login.get("last_login_error"))
-        rows = self._cached_device_rows()
-        scenes = self._sanitized_scenes()
+        rows = self._cached_device_rows(state)
+        scenes = self._sanitized_scenes(state)
         device_map, _category_map, mapping_errors = self._mapping_snapshot()
         tool_settings = self._tool_settings()
         unmapped = sum(
@@ -784,6 +824,7 @@ class MiHomeWebAPI:
                 self._login_qr_url = ""
                 self._login_qr_image = ""
                 self._login_qr_created_at = 0.0
+                self._login_qr_revision = ""
                 self._login_started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self._login_result = {
                     "status": "starting",
@@ -807,6 +848,8 @@ class MiHomeWebAPI:
                 self._login_qr_url,
             )
             self._login_qr_created_at = time.monotonic()
+            self._login_qr_generation += 1
+            self._login_qr_revision = str(self._login_qr_generation)
             self._login_result = {
                 "status": "waiting_scan",
                 "message": "请使用米家 App 扫码并确认授权。",
@@ -849,21 +892,32 @@ class MiHomeWebAPI:
             self._login_qr_url = ""
             self._login_qr_image = ""
             self._login_qr_created_at = 0.0
+            self._login_qr_revision = ""
 
-    def _login_status_payload(self) -> dict[str, Any]:
+    def _login_status_payload(
+        self,
+        known_qr_revision: str = "",
+    ) -> dict[str, Any]:
         running = self._login_task is not None and not self._login_task.done()
         qr_image = ""
+        qr_revision = ""
+        qr_available = False
         # 原始登录 URL 仅在服务端内存中用于生成二维码，不返回给浏览器。
         if (
             running
             and self._login_qr_url
             and time.monotonic() - self._login_qr_created_at <= 130
         ):
-            qr_image = self._login_qr_image
+            qr_available = bool(self._login_qr_image)
+            qr_revision = self._login_qr_revision
+            if qr_available and known_qr_revision != qr_revision:
+                qr_image = self._login_qr_image
         return {
             "running": running,
             "started_at": self._login_started_at,
             "qr_image": qr_image,
+            "qr_available": qr_available,
+            "qr_revision": qr_revision,
             "status": self._login_result.get("status", "idle"),
             "message": self._login_result.get("message", ""),
             "detail": _redact_text(self._login_result.get("detail")),
@@ -873,10 +927,13 @@ class MiHomeWebAPI:
         login = await self._client.get_login_status()
         credential_present = bool(login.get("auth_exists"))
         login_error = _redact_text(login.get("last_login_error"))
+        known_qr_revision = str(
+            request.query.get("qr_revision") or ""
+        ).strip()[:64]
         return _sensitive_json_response(
             {
                 "ok": True,
-                **self._login_status_payload(),
+                **self._login_status_payload(known_qr_revision),
                 "credential_present": credential_present,
                 "credential_state": (
                     "attention"
@@ -941,9 +998,7 @@ class MiHomeWebAPI:
         self._ensure_operation_available()
         async with self._operation_lock:
             devices = await self._client.get_devices()
-            self._device_snapshot = [
-                dict(item) for item in devices if isinstance(item, dict)
-            ]
+            self._device_snapshot = self._compact_device_snapshot(devices)
             self._device_snapshot_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             rows = self._build_device_rows(self._device_snapshot)
         return json_response(
@@ -1281,7 +1336,7 @@ class MiHomeWebAPI:
         return json_response(
             {
                 "ok": True,
-                "scenes": self._sanitized_scenes(),
+                "scenes": self._sanitized_scenes(state),
                 "cache_updated_at": str(state.get("scene_cache_updated_at") or ""),
                 "execution_available": False,
             }
@@ -1292,13 +1347,14 @@ class MiHomeWebAPI:
         self._ensure_operation_available()
         async with self._operation_lock:
             scenes = await self._client.get_scenes()
+        state = self._data_manager.load_state()
         return json_response(
             {
                 "ok": True,
-                "scenes": self._sanitized_scenes(),
+                "scenes": self._sanitized_scenes(state),
                 "count": len(scenes),
                 "cache_updated_at": str(
-                    self._data_manager.load_state().get("scene_cache_updated_at") or ""
+                    state.get("scene_cache_updated_at") or ""
                 ),
                 "execution_available": False,
                 "message": f"已同步 {len(scenes)} 个场景。",

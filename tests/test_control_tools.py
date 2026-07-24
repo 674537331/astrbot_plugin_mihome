@@ -277,6 +277,55 @@ class PropertyControlTests(unittest.IsolatedAsyncioTestCase):
             service._reserve_execution("same-did", "别名二"),
         )
 
+    def test_cooldown_tracking_is_bounded_without_dropping_active_entries(self):
+        service = control_module.MiHomeControlTools(_Plugin())
+        with patch.object(
+            control_module.time,
+            "monotonic",
+            return_value=100.0,
+        ):
+            for index in range(
+                control_module.MAX_COOLDOWN_TRACKED_DEVICES
+            ):
+                self.assertIsNone(
+                    service._reserve_execution(
+                        f"did-{index}",
+                        f"设备 {index}",
+                    )
+                )
+            self.assertIn(
+                "请求过多",
+                service._reserve_execution("overflow", "额外设备"),
+            )
+            self.assertIn(
+                "操作过于频繁",
+                service._reserve_execution("did-0", "设备 0"),
+            )
+
+        self.assertEqual(
+            len(service._last_execution_at),
+            control_module.MAX_COOLDOWN_TRACKED_DEVICES,
+        )
+
+    def test_cooldown_tracking_removes_only_expired_entries(self):
+        service = control_module.MiHomeControlTools(_Plugin())
+        service._last_execution_at = {
+            "expired": 96.0,
+            "active": 99.0,
+        }
+        with patch.object(
+            control_module.time,
+            "monotonic",
+            return_value=100.0,
+        ):
+            self.assertIsNone(
+                service._reserve_execution("new", "新设备")
+            )
+
+        self.assertNotIn("expired", service._last_execution_at)
+        self.assertIn("active", service._last_execution_at)
+        self.assertIn("new", service._last_execution_at)
+
 
 class ViomiAirConditionProfileTests(unittest.TestCase):
     def setUp(self):
@@ -583,10 +632,80 @@ class ClientCompatibilityTests(unittest.TestCase):
                 "run",
                 side_effect=AssertionError("valid cache must skip worker"),
             ):
-                device = client._prepare_device_sync("did-1")
+                with patch.object(
+                    client_module.time,
+                    "monotonic",
+                    return_value=100.0,
+                ):
+                    device = client._prepare_device_sync("did-1")
+                with patch.object(
+                    client_module.time,
+                    "monotonic",
+                    return_value=110.0,
+                ):
+                    cached_device = client._prepare_device_sync("did-1")
+                with patch.object(
+                    client_module.time,
+                    "monotonic",
+                    return_value=161.0,
+                ):
+                    refreshed_device = client._prepare_device_sync("did-1")
 
             self.assertEqual(device.name, "客厅开关")
             self.assertIn("on", device.prop_list)
+            self.assertIs(cached_device, device)
+            self.assertIsNot(refreshed_device, device)
+            self.assertEqual(client.api.get_devices_list.call_count, 2)
+
+    def test_prepared_device_cache_is_bounded_and_scoped_to_api(self):
+        devices = [
+            {
+                "did": f"did-{index}",
+                "name": f"设备 {index}",
+                "model": "example.switch.v1",
+            }
+            for index in range(client_module.PREPARED_DEVICE_CACHE_MAX_SIZE + 1)
+        ]
+        client = object.__new__(client_module.MiHomeClient)
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=devices)
+        )
+        client._load_or_fetch_device_spec = MagicMock(
+            return_value={
+                "name": "测试开关",
+                "properties": [],
+                "actions": [],
+            }
+        )
+
+        with patch.object(
+            client_module.time,
+            "monotonic",
+            return_value=100.0,
+        ):
+            for row in devices:
+                client._prepare_device_sync(row["did"])
+
+        self.assertEqual(
+            len(client._prepared_device_cache),
+            client_module.PREPARED_DEVICE_CACHE_MAX_SIZE,
+        )
+        self.assertNotIn("did-0", client._prepared_device_cache)
+
+        previous_api = client.api
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=[devices[-1]])
+        )
+        with patch.object(
+            client_module.time,
+            "monotonic",
+            return_value=110.0,
+        ):
+            refreshed = client._prepare_device_sync(devices[-1]["did"])
+
+        self.assertIs(refreshed.api, client.api)
+        self.assertIsNot(refreshed.api, previous_api)
+        client.api.get_devices_list.assert_called_once_with()
 
 
 class DataManagerCredentialTests(unittest.TestCase):
@@ -674,6 +793,28 @@ class DataManagerCredentialTests(unittest.TestCase):
             )
             self.assertEqual(list(manager.data_dir.glob(".state-*.tmp")), [])
 
+    def test_unchanged_state_update_skips_atomic_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+            manager.state_path.write_text(
+                '{"login_status": "success", "devices": ["did-1"]}',
+                encoding="utf-8",
+            )
+
+            with patch.object(manager, "save_state") as save_state:
+                self.assertTrue(
+                    manager.update_state(
+                        login_status="success",
+                        devices=["did-1"],
+                    )
+                )
+
+            save_state.assert_not_called()
+
     def test_corrupt_state_is_backed_up_before_atomic_recovery(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = object.__new__(data_manager_module.MiHomeDataManager)
@@ -697,6 +838,84 @@ class DataManagerCredentialTests(unittest.TestCase):
             self.assertEqual(
                 backups[0].read_text(encoding="utf-8"),
                 "{broken",
+            )
+
+    def test_empty_update_still_recovers_corrupt_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+            manager.state_path.write_text("{broken", encoding="utf-8")
+
+            self.assertTrue(manager.update_state())
+            self.assertEqual(
+                json.loads(manager.state_path.read_text(encoding="utf-8")),
+                {},
+            )
+            self.assertEqual(
+                len(list(manager.data_dir.glob("state.json.corrupt-*"))),
+                1,
+            )
+
+    def test_duplicate_corrupt_state_backup_is_reused(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+
+            for recovered_value in (1, 2):
+                manager.state_path.write_text("{same-broken", encoding="utf-8")
+                self.assertEqual(manager.load_state(), {})
+                self.assertTrue(
+                    manager.update_state(recovered=recovered_value)
+                )
+
+            backups = list(
+                manager.data_dir.glob("state.json.corrupt-*")
+            )
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(
+                backups[0].read_text(encoding="utf-8"),
+                "{same-broken",
+            )
+
+    def test_corrupt_state_backups_keep_only_latest_five(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = object.__new__(data_manager_module.MiHomeDataManager)
+            manager.data_dir = Path(temp_dir)
+            manager.state_path = manager.data_dir / "state.json"
+            manager._state_lock = threading.RLock()
+            manager._state_corrupt = False
+
+            with patch.object(
+                data_manager_module.time,
+                "time_ns",
+                side_effect=range(100, 107),
+            ):
+                for index in range(7):
+                    manager.state_path.write_text(
+                        f"{{broken-{index}",
+                        encoding="utf-8",
+                    )
+                    self.assertEqual(manager.load_state(), {})
+                    self.assertTrue(manager.update_state(recovered=index))
+
+            backups = sorted(
+                manager.data_dir.glob("state.json.corrupt-*")
+            )
+            self.assertEqual(
+                [path.name for path in backups],
+                [
+                    "state.json.corrupt-102",
+                    "state.json.corrupt-103",
+                    "state.json.corrupt-104",
+                    "state.json.corrupt-105",
+                    "state.json.corrupt-106",
+                ],
             )
 
     def test_explicit_logout_cleanup_removes_corrupt_state_backups(self):
@@ -753,6 +972,40 @@ class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
         rejected = self._client_with_property_response({"code": -1})
         with self.assertRaises(client_module.MiHomeControlError):
             await rejected.set_property("did", "volume", 20, "音箱")
+
+    async def test_login_status_accepts_existing_state_snapshot(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+
+        result = await client.get_login_status(
+            {
+                "last_login_at": "2026-07-24 12:00:00",
+                "last_login_error": "",
+            }
+        )
+
+        self.assertTrue(result["auth_exists"])
+        self.assertEqual(result["last_login_at"], "2026-07-24 12:00:00")
+        client.data_manager.load_state.assert_not_called()
+
+    async def test_device_sync_invalidates_prepared_device_cache(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client._prepared_device_cache = {
+            "did-1": (100.0, object(), object()),
+        }
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+        client.data_manager.update_state.return_value = True
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=[]),
+        )
+
+        self.assertEqual(await client.get_devices(), [])
+        self.assertEqual(client._prepared_device_cache, {})
 
     async def test_scene_requires_explicit_true_result(self):
         async def run_case(result):

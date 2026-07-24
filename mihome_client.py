@@ -10,6 +10,8 @@ import functools
 import inspect
 import subprocess
 import tempfile
+import time
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Callable, Awaitable, Union, Any, Optional, List
@@ -69,6 +71,8 @@ LOGIN_RUNNING = "running"
 HTTP_REQUEST_TIMEOUT = (8.0, 20.0)
 LOGIN_PROCESS_STOP_TIMEOUT = 5.0
 SPEC_FETCH_TIMEOUT = 25.0
+PREPARED_DEVICE_CACHE_TTL = 60.0
+PREPARED_DEVICE_CACHE_MAX_SIZE = 64
 DEVICE_MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}")
 
 
@@ -96,6 +100,7 @@ class MiHomeClient:
         self._login_status = LOGIN_IDLE
         self._login_process: Optional[asyncio.subprocess.Process] = None
         self._login_generation = 0
+        self._prepared_device_cache = OrderedDict()
         self._worker_script = os.path.join(os.path.dirname(__file__), "_login_worker.py")
         self._spec_worker_script = os.path.join(
             os.path.dirname(__file__),
@@ -133,6 +138,7 @@ class MiHomeClient:
             )
 
     def _initialize_api(self) -> None:
+        self._clear_prepared_device_cache()
         self.api = None
         if not self.data_manager.auth_storage_is_secure():
             raise MiHomeClientError(
@@ -141,6 +147,18 @@ class MiHomeClient:
         api = mijiaAPI(self.data_manager.get_auth_path())
         self._configure_api_instance(api)
         self.api = api
+
+    def _clear_prepared_device_cache(self) -> None:
+        cache = getattr(self, "_prepared_device_cache", None)
+        if cache is not None:
+            cache.clear()
+
+    def _get_prepared_device_cache(self) -> OrderedDict:
+        cache = getattr(self, "_prepared_device_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._prepared_device_cache = cache
+        return cache
 
     def _configure_api_session(self, api: Any = None) -> None:
         """为上游同步 Session 设置默认连接与读取超时。"""
@@ -635,10 +653,23 @@ class MiHomeClient:
     def _prepare_device_sync(self, did: str):
         # 业务请求前不能调用 login()；凭证失效时，上游 login() 可能进入
         # 120 秒扫码长轮询。这里只使用有界的设备列表请求和规格子进程。
+        target_did = str(did).strip()
+        cache = self._get_prepared_device_cache()
+        cached = cache.get(target_did)
+        if cached is not None:
+            cached_at, cached_api, cached_device = cached
+            if (
+                cached_api is self.api
+                and time.monotonic() - cached_at
+                < PREPARED_DEVICE_CACHE_TTL
+            ):
+                cache.move_to_end(target_did)
+                return cached_device
+            cache.pop(target_did, None)
+
         devices = self.api.get_devices_list()
         if not isinstance(devices, list):
             devices = []
-        target_did = str(did).strip()
         matches = [
             item
             for item in devices
@@ -711,6 +742,11 @@ class MiHomeClient:
                     f"{method.get('aiid', 'x')}"
                 )
             device.action_list[action_name] = action_obj
+
+        cache[target_did] = (time.monotonic(), self.api, device)
+        cache.move_to_end(target_did)
+        while len(cache) > PREPARED_DEVICE_CACHE_MAX_SIZE:
+            cache.popitem(last=False)
         return device
 
     def _normalize_scene_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -833,8 +869,12 @@ class MiHomeClient:
             sanitized,
         )
 
-    async def get_login_status(self) -> Dict[str, Any]:
-        state = self.data_manager.load_state()
+    async def get_login_status(
+        self,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if state is None:
+            state = self.data_manager.load_state()
         return {
             "auth_exists": self.data_manager.auth_exists(),
             "login_in_progress": self._login_status != LOGIN_IDLE,
@@ -1062,6 +1102,7 @@ class MiHomeClient:
         self._check_api()
         try:
             async with self._api_lock:
+                self._clear_prepared_device_cache()
                 own = await self._run_sync_call(
                     self.api.get_devices_list,
                     warn_after=20.0,
@@ -1682,4 +1723,5 @@ class MiHomeClient:
                     logger.warning(
                         f"[MiHome] 关闭云端会话失败: {type(exc).__name__}"
                     )
+            self._clear_prepared_device_cache()
             self.api = None

@@ -4,7 +4,7 @@ desc: AstrBot 的米家云端智能管家插件
 short_desc: 在 AstrBot 内安全管理米家设备、场景与白名单控制。
 help: |
   发送 /米家帮助 查看完整指令总览；发送 /米家帮助 [设备别名] 查看设备专属控制示例。
-version: v8.0.1
+version: v8.1.0
 astrbot_version: ">=4.24.2"
 author: RyanVaderAn
 repo: https://github.com/674537331/astrbot_plugin_mihome

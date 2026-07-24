@@ -375,6 +375,19 @@ v8 继续读取原有 `device_map`、`device_category_map`、`scene_tool` 与只
 ## 🔬 进阶与反馈
 
 <details>
+<summary><b>🧰 维护者检查工具（点击展开）</b></summary>
+
+仓库内的 [tools/maintenance](tools/maintenance/README.md) 保存了发布前项目检查、`mijiaAPI` 上游核对、性能基线与审计记录，后续更新可直接复用。
+
+```bash
+python tools/maintenance/check_project.py --all
+python tools/maintenance/check_upstream.py
+python tools/maintenance/performance_baseline.py --include-tests
+```
+
+</details>
+
+<details>
 <summary><b>🧠 技术细节：三层降级解析机制（点击展开）</b></summary>
 
 本插件采用以下顺序解析设备能力：

@@ -44,6 +44,7 @@ MAX_ACTION_PARAMETERS = 4
 MAX_TEXT_PARAMETER_LENGTH = 500
 MAX_PROPERTY_VALUE_LENGTH = 256
 CONTROL_COOLDOWN_SECONDS = 3.0
+MAX_COOLDOWN_TRACKED_DEVICES = 256
 DENIED_CROSS_DEVICE_ACTIONS = frozenset(
     {
         "execute-text-directive",
@@ -377,13 +378,31 @@ class MiHomeControlTools:
         """按 DID 限制连续物理操作，防止同设备多别名绕过冷却。"""
 
         now = time.monotonic()
-        last = self._last_execution_at.get(device_key, 0.0)
-        remaining = CONTROL_COOLDOWN_SECONDS - (now - last)
-        if remaining > 0:
+        expired_before = now - CONTROL_COOLDOWN_SECONDS
+        expired_keys = [
+            key
+            for key, executed_at in self._last_execution_at.items()
+            if executed_at <= expired_before
+        ]
+        for key in expired_keys:
+            self._last_execution_at.pop(key, None)
+
+        last = self._last_execution_at.get(device_key)
+        remaining = (
+            CONTROL_COOLDOWN_SECONDS - (now - last)
+            if last is not None
+            else 0.0
+        )
+        if last is not None and remaining > 0:
             return (
                 f"设备“{display_alias}”操作过于频繁，请至少等待 "
                 f"{CONTROL_COOLDOWN_SECONDS:g} 秒后再试。"
             )
+        if (
+            device_key not in self._last_execution_at
+            and len(self._last_execution_at) >= MAX_COOLDOWN_TRACKED_DEVICES
+        ):
+            return "短时间内设备控制请求过多，请稍后再试。"
         # 本方法在首个 await 之前同步执行，事件循环内的检查与占位不可分割。
         self._last_execution_at[device_key] = now
         return None
