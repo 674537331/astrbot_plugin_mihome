@@ -15,7 +15,7 @@ LLM 设备控制采用更严格的边界：
 - 设备必须在 `control_tool.allowed_devices` 白名单中；
 - `control_tool` 默认关闭，`admin_only` 默认开启；
 - 只有命中受信任的**型号精确画像**，并且画像存在可写属性或动作时，才会开放 LLM 直接控制；
-- 未知型号即使能探测到属性或配置了类别，也只允许检查，不会把动态能力自动提升为可写白名单；
+- 未知型号即使能探测到属性或配置了类别，也只允许检查；可写白名单仅来自精确型号画像；
 - 红外设备不开放 LLM 直接控制，建议使用米家场景。
 
 ## 型号精确画像
@@ -34,11 +34,11 @@ LLM 设备控制采用更严格的边界：
 | 路由器 | `xiaomi.router.r4av2` | 速率、连接数、联网与 Wi-Fi 状态、重启动作 | 仅画像中的动作可用 | [Issue #8](https://github.com/674537331/astrbot_plugin_mihome/issues/8)，未标记实机验证 |
 | 智能音箱 | `xiaomi.wifispeaker.oh2p` | 音量、静音、播放状态、媒体及文本动作 | 按静态可写项和动作开放 | @Siq5005 在 [PR #13](https://github.com/674537331/astrbot_plugin_mihome/pull/13) 提供实机能力数据；v8 已安全重构 |
 
-`xiaomi.wifispeaker.oh2p` 的带参动作只按该精确型号验证过的参数结构执行，不会把同名动作参数推广到其他音箱型号。
+`xiaomi.wifispeaker.oh2p` 的带参动作只按该精确型号验证过的参数结构执行，同名动作参数不推广到其他音箱型号。
 
 ## 类别画像
 
-下列类别用于中文展示、状态读取和管理员命令参考。它们不是对所有同类设备的兼容承诺，也不会让未知型号自动获得 LLM 直接控制权限。
+下列类别用于中文展示、状态读取和管理员命令参考。它们不是对所有同类设备的兼容承诺；未知型号的 LLM 直接控制权限仍以精确型号画像为准。
 
 | 类别 | 覆盖方向 | 已知边界 |
 | --- | --- | --- |
@@ -65,7 +65,7 @@ LLM 设备控制采用更严格的边界：
 4. 调用 `list_mihome_devices`；只有 `direct_control_supported: true` 的设备才可继续。
 5. 调用 `inspect_mihome_device`，控制时只使用返回的 `writable_properties` 和 `actions`。`observed_capabilities` 只供诊断。
 
-`control_mihome_device` 单批最多 5 项，按顺序执行且不会自动回滚。应逐项核对返回结果，不要将“部分成功”理解为整批完成。
+`control_mihome_device` 单批最多 5 项并按顺序执行，已完成项保留结果。应逐项核对返回结果，不要将“部分成功”理解为整批完成。
 
 ## 申请适配
 

@@ -259,6 +259,7 @@ function navigate(view) {
   const [title, subtitle] = VIEW_META[view];
   setText("#page-title", title);
   setText("#page-subtitle", subtitle);
+  updateMappingDock();
   window.scrollTo({ top: 0, behavior: "smooth" });
   loadView(view, false);
 }
@@ -277,7 +278,8 @@ async function loadView(view, force) {
       const tasks = [];
       if (force || !state.loaded.devices) tasks.push(loadDevices(false));
       if (force || !state.loaded.scenes) tasks.push(loadScenes(false));
-      if (force || !state.loaded.tools) tasks.push(loadTools());
+      const toolsDirty = state.loaded.tools && serializedTools() !== state.originalTools;
+      if (force || !state.loaded.tools || !toolsDirty) tasks.push(loadTools());
       await Promise.allSettled(tasks);
     } else if (view === "diagnostics" && (force || !state.loaded.diagnostics)) {
       await loadDiagnostics(false);
@@ -482,11 +484,10 @@ async function pollAuthStatus() {
 async function logout() {
   const confirmed = await openDialog({
     title: "退出米家账号？",
-    message: "这会清除插件保存的米家登录凭证与本地账号状态。设备映射配置不会被删除。",
+    message: "这会清除插件保存的米家登录凭证与本地账号状态，并保留设备映射配置。",
     summary: [
       "登录凭证将从插件数据目录移除",
       "需要重新扫码后才能同步设备与场景",
-      "此操作不会关闭或控制任何米家设备",
     ],
     confirmLabel: "确认退出并清除",
     danger: true,
@@ -778,9 +779,20 @@ function updateDeviceValidation() {
 
 function updateMappingDock() {
   const changes = getMappingChanges();
+  const hasDuplicates = getDuplicateAliases().size > 0;
+  const visible = state.currentView === "devices" && changes.length > 0;
   const dock = $("#mapping-save-dock");
-  dock.hidden = changes.length === 0;
+  const topButton = $("#save-device-mappings");
+  dock.hidden = !visible;
+  topButton.hidden = !visible;
+  topButton.disabled = hasDuplicates;
   setText("#mapping-change-count", `${changes.length} 项待保存`);
+  setText("#save-device-mappings-label", `保存 ${changes.length}`);
+}
+
+function setMappingSaveLoading(loading) {
+  setButtonLoading($("#review-mappings"), loading);
+  setButtonLoading($("#save-device-mappings"), loading);
 }
 
 function mappingSummary(changes) {
@@ -854,12 +866,11 @@ async function reviewAndSaveMappings() {
     return;
   }
 
-  const button = $("#review-mappings");
-  setButtonLoading(button, true);
+  setMappingSaveLoading(true);
   try {
     const mappings = collectMappings();
     const preview = await apiPost(ENDPOINTS.deviceMappings, { mappings });
-    setButtonLoading(button, false);
+    setMappingSaveLoading(false);
     const confirmed = await openDialog({
       title: "保存设备映射？",
       message: "以下修改已通过后端校验。确认后才会写入插件配置，聊天命令与只读 Tool 将使用新的映射。",
@@ -867,7 +878,7 @@ async function reviewAndSaveMappings() {
       confirmLabel: "确认保存",
     });
     if (!confirmed) return;
-    setButtonLoading(button, true);
+    setMappingSaveLoading(true);
     await apiPost(ENDPOINTS.deviceMappings, { mappings, confirm: true });
     state.devices.forEach((device) => { device.alias = device.alias.trim(); });
     snapshotMappings();
@@ -878,7 +889,7 @@ async function reviewAndSaveMappings() {
   } catch (error) {
     showToast("设备映射保存失败", getErrorMessage(error), "error");
   } finally {
-    setButtonLoading(button, false);
+    setMappingSaveLoading(false);
   }
 }
 
@@ -979,7 +990,7 @@ async function showDeviceStatus(device) {
   layer.hidden = false;
   document.body.style.overflow = "hidden";
   setText("#device-detail-title", device.alias);
-  setText("#device-detail-subtitle", `${device.cloudName} · 仅读取，不会执行任何控制`);
+  setText("#device-detail-subtitle", `${device.cloudName} · 实时只读状态`);
   $("#device-detail-loading").hidden = false;
   $("#device-detail-content").hidden = true;
   $("#device-detail-error").hidden = true;
@@ -1069,7 +1080,7 @@ async function syncScenes() {
   setButtonLoading(button, true);
   try {
     await loadScenes(true);
-    showToast("场景目录已同步", `已缓存 ${state.scenes.length} 个场景；本页面没有执行任何场景`);
+    showToast("场景目录已同步", `已缓存 ${state.scenes.length} 个场景`);
   } catch (error) {
     showToast("场景同步失败", getErrorMessage(error), "error");
   } finally {
@@ -1203,7 +1214,7 @@ function updateToolState() {
   setText("#control-allowlist-count", `${state.tools.control_tool.allowed_devices.length} 台`);
   const badge = $("#tool-save-state");
   badge.className = `status-badge is-${dirty ? "warning" : "neutral"}`;
-  badge.textContent = dirty ? "有未保存修改" : "已同步";
+  badge.textContent = dirty ? "有未保存修改" : "已保存";
 }
 
 async function saveTools() {
@@ -1219,7 +1230,7 @@ async function saveTools() {
     `设备控制权限：${state.tools.control_tool.admin_only ? "仅 AstrBot 管理员" : "所有可调用用户"}`,
     `设备控制白名单：${state.tools.control_tool.allowed_devices.length
       ? state.tools.control_tool.allowed_devices.join("、")
-      : "空（不会控制任何设备）"}`,
+      : "未配置"}`,
   ];
   if (sceneRisky) summary.push("风险提示：当前场景 Tool 未限制为仅管理员调用");
   if (controlRisky) summary.push("高风险提示：当前设备控制 Tool 未限制为仅管理员调用");
@@ -1240,15 +1251,16 @@ async function saveTools() {
   const button = $("#save-tools");
   setButtonLoading(button, true);
   try {
-    await apiPost(ENDPOINTS.tools, {
+    const saved = await apiPost(ENDPOINTS.tools, {
       ...state.tools,
       ...(sceneRisky ? { confirm_public_scene_tool: true } : {}),
       ...(controlEnabled ? { confirm_control_tool: true } : {}),
       ...(controlRisky ? { confirm_public_control_tool: true } : {}),
     });
+    state.tools = normalizeTools(saved);
     state.originalTools = serializedTools();
-    updateToolState();
-    showToast("Tool 权限已保存", "新的权限设置已生效");
+    renderTools();
+    showToast("Tool 权限已保存", "新的权限设置已写入插件配置并生效");
   } catch (error) {
     showToast("Tool 权限保存失败", getErrorMessage(error), "error");
   } finally {
@@ -1500,6 +1512,7 @@ function bindEvents() {
   $("#sync-devices").addEventListener("click", syncDevices);
   $("#sync-scenes").addEventListener("click", syncScenes);
   $("#review-mappings").addEventListener("click", reviewAndSaveMappings);
+  $("#save-device-mappings").addEventListener("click", reviewAndSaveMappings);
   $("#reset-mappings").addEventListener("click", resetMappings);
   $("#save-tools").addEventListener("click", saveTools);
   $("#run-diagnostics").addEventListener("click", runDiagnostics);

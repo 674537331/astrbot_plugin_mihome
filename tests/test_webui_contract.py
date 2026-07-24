@@ -391,6 +391,53 @@ class WebAPIBehaviorTests(unittest.TestCase):
             asyncio.run(api.save_tool_settings())
         self.assertNotIn("control_tool", plugin.config)
 
+    def test_scene_tool_settings_share_native_plugin_config(self):
+        api, plugin = self.build_api(
+            {
+                "scene_tool": {"enable": False, "admin_only": True},
+                "enable_scene_tool": False,
+                "scene_tool_admin_only": True,
+                "enable_readonly_tool": False,
+            }
+        )
+        self.set_request_payload(
+            {
+                "enable_readonly_tool": True,
+                "scene_tool": {"enable": True, "admin_only": False},
+                "control_tool": {
+                    "enable": False,
+                    "admin_only": True,
+                    "allowed_devices": [],
+                },
+                "confirm_public_scene_tool": True,
+            }
+        )
+
+        response = asyncio.run(api.save_tool_settings())
+
+        self.assertTrue(response["payload"]["saved"])
+        self.assertEqual(
+            plugin.config["scene_tool"],
+            {"enable": True, "admin_only": False},
+        )
+        self.assertTrue(plugin.config["enable_scene_tool"])
+        self.assertFalse(plugin.config["scene_tool_admin_only"])
+        self.assertEqual(plugin.config.save_count, 1)
+
+        # 模拟原生“插件设置”写入当前 AstrBotConfig。
+        plugin.config["scene_tool"] = {"enable": False, "admin_only": True}
+        self.assertEqual(
+            api._tool_settings()["scene_tool"],
+            {"enable": False, "admin_only": True},
+        )
+
+        # 原生设置保存会热重载插件；新实例应从同一份持久化配置回读。
+        reloaded_api, _reloaded_plugin = self.build_api(dict(plugin.config))
+        self.assertEqual(
+            reloaded_api._tool_settings()["scene_tool"],
+            {"enable": False, "admin_only": True},
+        )
+
     def test_tool_settings_roll_back_exactly_when_persistence_fails(self):
         original = {
             "device_map": '{"客厅灯": "123"}',
@@ -433,7 +480,16 @@ class WebUIStaticContractTests(unittest.TestCase):
             script.index("account.running ??"),
             script.index("account.login_in_progress ??"),
         )
-        self.assertIn("#ff6900", style.lower())
+        self.assertIn("#12875d", style.lower())
+        self.assertNotIn("#ff6900", style.lower())
+        self.assertIn('id="save-device-mappings"', html)
+        self.assertIn(
+            '$("#save-device-mappings").addEventListener("click", reviewAndSaveMappings)',
+            script,
+        )
+        self.assertIn(".save-dock { display: none !important; }", style)
+        self.assertIn("state.tools = normalizeTools(saved)", script)
+        self.assertIn('badge.textContent = dirty ? "有未保存修改" : "已保存"', script)
         for forbidden in (
             "fetch(",
             "window.confirm",
@@ -537,7 +593,7 @@ class WebUIStaticContractTests(unittest.TestCase):
         changelog = CHANGELOG_PATH.read_text(encoding="utf-8")
         self.assertRegex(
             changelog,
-            re.compile(r"^## \[v8\.0\.0\] - 2026-07-24$", re.MULTILINE),
+            re.compile(r"^## \[v8\.0\.1\] - 2026-07-24$", re.MULTILINE),
         )
 
         tree = ast.parse(MAIN_PATH.read_text(encoding="utf-8"))

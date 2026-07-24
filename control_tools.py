@@ -3,7 +3,7 @@
 
 本模块吸收了 @Siq5005 在 PR #13 中提出的能力聚合与四 Tool 设计，
 但执行时只信任管理员明确配置的别名、类别/型号静态画像和设备白名单。
-动态发现结果仅用于检查，不会自动扩大可控制范围。
+动态发现结果仅用于检查，可控制范围由静态型号画像和管理员白名单共同确定。
 """
 
 import asyncio
@@ -132,7 +132,7 @@ class MiHomeControlTools:
         if settings["admin_only"] and not self.plugin._event_is_admin(event):
             return "米家设备控制 Tool 当前仅允许 AstrBot 管理员调用。"
         if not settings["allowed_devices"]:
-            return "米家设备控制 Tool 尚未配置设备白名单，当前不会控制任何设备。"
+            return "米家设备控制 Tool 尚未配置设备白名单，当前控制范围为空。"
         return None
 
     def _resolve_allowed_device(
@@ -281,7 +281,7 @@ class MiHomeControlTools:
             "readable": safe_keys("readable"),
             "writable": safe_keys("writable"),
             "actions": safe_keys("actions"),
-            "notice": "云端发现结果只用于诊断，不会自动加入可控制白名单。",
+            "notice": "云端发现结果只用于诊断，可控制白名单须由管理员显式配置。",
         }
 
     async def list_devices(self, event: Any) -> str:
@@ -346,7 +346,7 @@ class MiHomeControlTools:
             }
         result["notice"] = (
             "执行控制时只使用上述静态 writable_properties/actions，"
-            "不会使用 observed_capabilities 扩权。"
+            "可控制范围仅使用静态型号画像和管理员白名单，忽略 observed_capabilities。"
         )
         return json.dumps(result, ensure_ascii=False)
 
@@ -580,7 +580,7 @@ class MiHomeControlTools:
                 },
                 "results": results,
                 "notice": (
-                    "操作按顺序执行且不会自动回滚；unconfirmed 只表示"
+                    "操作按顺序执行，已完成项保留结果；unconfirmed 只表示"
                     "网关已接收，不能据此声称设备已经完成操作。"
                 ),
             },
@@ -690,7 +690,7 @@ class MiHomeControlTools:
         else:
             if parsed_params:
                 return (
-                    "该动作没有经过带参调用验证，v8 不会把参数直接透传给云端。"
+                    "该动作未经过带参调用验证，仅接受无参调用。"
                 )
             in_params = []
 

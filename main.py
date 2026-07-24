@@ -104,7 +104,7 @@ READONLY_ALLOWED_CATEGORIES = {
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.0.0")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.0.1")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -1130,8 +1130,8 @@ class MiHomeControlPlugin(Star):
         """
         列出当前插件中已配置的米家设备别名（只读工具）。
         使用限制：
-        1. 仅返回 device_map 中已显式配置的设备别名，不会读取未配置别名的设备。
-        2. 该工具不会执行任何设备控制，也不会读取设备实时状态。
+        1. 仅返回 device_map 中已显式配置的设备别名，未配置别名不在返回范围内。
+        2. 该工具只列出别名，设备控制与实时状态读取由其他工具负责。
         3. 当你需要确定某个设备的精确别名时，才应调用本工具。
         4. 若用户只是普通聊天或寒暄，不应调用本工具。
         """
@@ -1160,7 +1160,7 @@ class MiHomeControlPlugin(Star):
         使用限制（必须遵守）：
         1. 该工具只允许读取状态，不允许执行任何控制、动作或场景。
         2. 该工具只能从 device_map 中已配置的精确别名中检索设备，不能读取未配置别名的设备。
-        3. 该工具不会使用缓存，返回结果为实时读取。
+        3. 该工具每次调用均实时读取设备状态。
         4. 若不确定设备精确别名，应先调用 list_configured_mihome_aliases 获取别名列表。
         5. 优先用于温湿度、空气质量、电源状态、工作模式等状态查询场景。
         Args:
@@ -1184,7 +1184,7 @@ class MiHomeControlPlugin(Star):
         读取本插件缓存的米家场景列表（只读工具）。
 
         使用限制：
-        1. 仅用于查询当前已同步到插件缓存中的米家场景，不会实时访问云端。
+        1. 仅用于查询当前已同步到插件缓存中的米家场景，不实时访问云端。
         2. 当用户明确提到“场景”、要求执行家居控制、或你需要确认可执行场景名称时，才应调用本工具。
         3. 不要因为普通寒暄或自然表达（例如“晚安”“早安”“我要睡了”“我出门了”）就主动调用本工具。
         4. 若缓存为空，应提示用户先手动执行 /米家场景列表 完成同步。
@@ -1294,7 +1294,7 @@ class MiHomeControlPlugin(Star):
 
         使用限制：
         1. 本工具只列出 control_tool.allowed_devices 中的别名，不返回 DID。
-        2. 本工具不会读取实时状态，也不会执行控制。
+        2. 本工具返回静态能力与云端观测能力，仅供检查。
         3. direct_control_supported=false 的设备只能检查，不能直接控制。
         """
         return await self.control_tools.list_devices(event)
@@ -1308,7 +1308,7 @@ class MiHomeControlPlugin(Star):
         """
         检查白名单内一台米家设备的静态可控能力与云端观测能力。
 
-        云端观测结果仅用于诊断，不会自动扩大属性或动作白名单。
+        云端观测结果仅用于诊断，属性与动作白名单由静态型号画像确定。
         Args:
             device_alias(string): 管理员已加入控制白名单的精确设备别名
         """
@@ -1326,7 +1326,7 @@ class MiHomeControlPlugin(Star):
 
         使用限制：
         1. 仅在用户明确要求控制设备时调用。
-        2. 单次最多 5 项，操作按顺序执行，部分成功不会自动回滚。
+        2. 单次最多 5 项，操作按顺序执行，已完成项保留结果。
         3. 只能使用 inspect_mihome_device 返回的 writable_properties。
         4. 在工具返回明确成功前，不得向用户声称操作已经完成。
         Args:

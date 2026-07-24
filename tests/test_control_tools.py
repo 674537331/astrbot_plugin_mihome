@@ -279,7 +279,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
             "start_sweep",
             ["unexpected"],
         )
-        self.assertIn("不会把参数直接透传", result)
+        self.assertIn("仅接受无参调用", result)
         plugin.client.run_action.assert_not_awaited()
 
     def test_strict_bool_parameter_rejects_unknown_strings(self):

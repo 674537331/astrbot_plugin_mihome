@@ -53,7 +53,7 @@
         "description": "设备控制 LLM Tool 是否仅管理员可调用",
         "type": "bool",
         "default": true,
-        "hint": "只信任 AstrBot 官方 event.is_admin() 判定；不会把群管理员自动视为 AstrBot 管理员。强烈建议保持开启。"
+        "hint": "仅以 AstrBot 官方 event.is_admin() 作为管理员判定，群管理员身份不参与此权限计算。强烈建议保持开启。"
       },
       "allowed_devices": {
         "description": "允许控制的设备别名白名单",
@@ -62,7 +62,7 @@
         "items": {
           "type": "string"
         },
-        "hint": "填写 device_map 中的精确别名。空列表会失败关闭：即使总开关已打开，也不会控制任何设备。推荐在插件详情页的“米家管理”中勾选。"
+        "hint": "填写 device_map 中的精确别名。空列表会失败关闭，启用前请至少选择一台设备。推荐在插件详情页的“米家管理”中勾选。"
       }
     }
   },
@@ -82,6 +82,6 @@
     "description": "是否启用米家设备只读 LLM Tool",
     "type": "bool",
     "default": false,
-    "hint": "开启后，大模型可调用米家设备只读查询工具。该工具只能从已配置的 device_map 别名中检索设备，并实时读取状态；不会执行任何控制，也不会读取未配置别名的设备。"
+    "hint": "开启后，大模型可调用米家设备只读查询工具。该工具限定于从 device_map 的已配置别名中检索设备并实时读取状态。"
   }
 }

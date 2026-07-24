@@ -5,7 +5,7 @@
 “米家遥控器”，本模块刻意不注册任何设备控制或场景执行接口。
 
 ``Context.register_web_api`` 注册的路由由 AstrBot Dashboard 统一鉴权；
-本模块不会监听额外端口，也不会绕过 Dashboard 暴露公开 HTTP 服务。
+本模块通过 Dashboard Plugin Pages 桥接提供管理接口。
 """
 
 from __future__ import annotations
@@ -579,7 +579,7 @@ class MiHomeWebAPI:
         if control_risky:
             warnings.append("设备控制 Tool 当前允许非管理员调用，可能触发真实物理操作。")
         if control_enable and not allowed_aliases:
-            warnings.append("设备控制 Tool 已开启但白名单为空，当前不会控制任何设备。")
+            warnings.append("设备控制 Tool 已开启但白名单为空，当前控制范围为空。")
         return {
             "scene_tool": {
                 "enable": scene_enable,

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#ff6900">
+  <meta name="theme-color" content="#12875d">
   <title>米家云端管理</title>
   <link rel="stylesheet" href="./style.css">
 </head>
@@ -59,6 +59,10 @@
             <span class="status-dot" aria-hidden="true"></span>
             <span>读取中</span>
           </span>
+          <button class="button button-primary topbar-save" id="save-device-mappings" type="button" hidden>
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 3h12l2 2v16H5V3Zm2 2v14h10V6.2L15.8 5H7Zm2 1h6v5H9V6Zm0 8h6v3H9v-3Z"/></svg>
+            <span id="save-device-mappings-label">保存</span>
+          </button>
           <button class="icon-button" id="refresh-current" type="button" aria-label="刷新当前页面" title="刷新当前页面">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18.4 5.6A9 9 0 1 0 20.8 14h-2.1A7 7 0 1 1 17 7l-3 3h8V2l-3.6 3.6Z"/></svg>
           </button>
@@ -70,7 +74,7 @@
           <div class="hero-copy">
             <span class="hero-kicker">米家 × AstrBot</span>
             <h2>把配置变简单，<br><em>把控制留在聊天里。</em></h2>
-            <p>这里仅负责账号授权、设备映射、场景同步和问题诊断，不会直接控制任何设备或执行场景。</p>
+            <p>在这里完成账号授权、设备映射、场景同步和问题诊断。</p>
             <div class="hero-actions">
               <button class="button button-primary" id="hero-login" type="button">
                 <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-1 15-4-4 1.4-1.4 2.6 2.6 5.6-5.6L18 10l-7 7Z"/></svg>
@@ -93,7 +97,7 @@
 
         <div class="metric-grid" aria-label="运行概览">
           <article class="metric-card">
-            <span class="metric-icon is-orange"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.74V22l4-2 4 2v-7.26A7 7 0 0 0 12 2Zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z"/></svg></span>
+            <span class="metric-icon is-accent"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.74V22l4-2 4 2v-7.26A7 7 0 0 0 12 2Zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z"/></svg></span>
             <div><span>账号状态</span><strong id="metric-account">读取中</strong><small id="metric-login-time">尚未获取</small></div>
           </article>
           <article class="metric-card">
@@ -190,7 +194,7 @@
           <div>
             <span class="section-kicker">设备映射</span>
             <h2>设备映射</h2>
-            <p>为云端设备设置聊天中使用的别名和明确类别。这里不提供任何设备控制。</p>
+            <p>为云端设备设置聊天中使用的别名和明确类别。</p>
           </div>
           <button class="button button-primary" id="sync-devices" type="button">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18.4 5.6A9 9 0 1 0 20.8 14h-2.1A7 7 0 1 1 17 7l-3 3h8V2l-3.6 3.6Z"/></svg>
@@ -200,7 +204,7 @@
 
         <div class="info-banner">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M11 10h2v7h-2v-7Zm0-3h2v2h-2V7Zm1-5a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16Z"/></svg>
-          <div><strong>别名就是聊天中的设备名称</strong><span>建议使用“房间 + 设备”，例如“客厅 空调”。未设置别名的设备不会进入插件映射。</span></div>
+          <div><strong>别名就是聊天中的设备名称</strong><span>建议使用“房间 + 设备”，例如“客厅 空调”。填写别名后，设备将加入插件映射。</span></div>
         </div>
 
         <div class="device-toolbar card">
@@ -242,7 +246,7 @@
           <div>
             <span class="section-kicker">场景与 TOOL</span>
             <h2>场景与 Tool 权限</h2>
-            <p>同步场景目录并管理大模型 Tool 的开放范围。此页面不会执行场景。</p>
+            <p>同步场景目录并管理大模型 Tool 的开放范围。</p>
           </div>
           <button class="button button-secondary" id="sync-scenes" type="button">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18.4 5.6A9 9 0 1 0 20.8 14h-2.1A7 7 0 1 1 17 7l-3 3h8V2l-3.6 3.6Z"/></svg>
@@ -259,16 +263,16 @@
           <article class="card tool-card">
             <div class="card-heading">
               <div><span class="section-kicker">权限设置</span><h3>LLM Tool 权限</h3></div>
-              <span class="status-badge is-neutral" id="tool-save-state">已同步</span>
+              <span class="status-badge is-neutral" id="tool-save-state">已保存</span>
             </div>
             <div class="setting-list">
               <label class="setting-row">
                 <span class="setting-icon is-blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v16H4V4Zm2 2v12h12V6H6Zm2 3h8v2H8V9Zm0 4h5v2H8v-2Z"/></svg></span>
-                <span class="setting-copy"><strong>设备只读 Tool</strong><small>仅允许读取已映射设备的实时状态，不包含控制能力。</small></span>
+                <span class="setting-copy"><strong>设备只读 Tool</strong><small>用于读取已映射设备的实时状态。</small></span>
                 <span class="switch"><input id="tool-readonly" type="checkbox"><span aria-hidden="true"></span></span>
               </label>
               <label class="setting-row">
-                <span class="setting-icon is-orange"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3L18.7 8 12 11.7 5.3 8 12 4.3Z"/></svg></span>
+                <span class="setting-icon is-accent"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3L18.7 8 12 11.7 5.3 8 12 4.3Z"/></svg></span>
                 <span class="setting-copy"><strong>场景 LLM Tool</strong><small>允许读取缓存场景，并可能由大模型请求执行场景。</small></span>
                 <span class="switch"><input id="tool-scenes" type="checkbox"><span aria-hidden="true"></span></span>
               </label>
@@ -278,19 +282,19 @@
                 <span class="switch"><input id="tool-admin-only" type="checkbox"><span aria-hidden="true"></span></span>
               </label>
               <label class="setting-row">
-                <span class="setting-icon is-orange"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 2h10a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H7Zm5 3a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-4 7h8v2H8v-2Z"/></svg></span>
+                <span class="setting-icon is-accent"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 2h10a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H7Zm5 3a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-4 7h8v2H8v-2Z"/></svg></span>
                 <span class="setting-copy"><strong>设备控制 LLM Tool</strong><small>允许大模型控制白名单设备的静态可写属性与动作；默认关闭。</small></span>
                 <span class="switch"><input id="tool-control" type="checkbox"><span aria-hidden="true"></span></span>
               </label>
               <label class="setting-row is-nested" id="control-admin-only-row">
                 <span class="setting-icon is-green"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 1 5 5v2h2v13H5V9h2V7a5 5 0 0 1 5-5Zm3 7V7a3 3 0 0 0-6 0v2h6Zm-8 2v9h10v-9H7Z"/></svg></span>
-                <span class="setting-copy"><strong>仅 AstrBot 管理员可控制设备</strong><small>不会把群管理员自动视为 AstrBot 管理员，强烈建议保持开启。</small></span>
+                <span class="setting-copy"><strong>仅 AstrBot 管理员可控制设备</strong><small>此项依据 AstrBot 管理员权限判定，强烈建议保持开启。</small></span>
                 <span class="switch"><input id="tool-control-admin-only" type="checkbox"><span aria-hidden="true"></span></span>
               </label>
             </div>
             <div class="control-allowlist" id="control-allowlist-panel">
               <div class="allowlist-heading">
-                <div><strong>可控制设备白名单</strong><small>只显示已配置别名；留空时会失败关闭。</small></div>
+                <div><strong>可控制设备白名单</strong><small>启用控制 Tool 前至少勾选一台已配置别名的设备。</small></div>
                 <span id="control-allowlist-count">0 台</span>
               </div>
               <div class="allowlist-grid" id="control-allowlist"></div>
@@ -305,6 +309,7 @@
               <span>设备控制 Tool 可改变真实家居状态；公开给非管理员的风险很高。</span>
             </div>
             <button class="button button-primary button-block" id="save-tools" type="button" disabled>保存 Tool 权限</button>
+            <p class="config-sync-note">与 AstrBot“插件设置”共用同一份配置；重新进入本页或刷新可读取外部更改。</p>
           </article>
 
           <article class="card scene-card">
@@ -360,8 +365,8 @@
             <div class="privacy-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 1 5 5v2h2v13H5V9h2V7a5 5 0 0 1 5-5Zm3 7V7a3 3 0 0 0-6 0v2h6Zm-8 2v9h10v-9H7Z"/></svg></div>
             <div>
               <span class="section-kicker">隐私保护</span>
-              <h3>凭证不会在页面中展示</h3>
-              <p>诊断接口只返回脱敏后的运行信息。Cookie、Token 与登录文件不可查看或下载。</p>
+              <h3>诊断信息已脱敏</h3>
+              <p>诊断接口返回脱敏后的运行信息，页面不含 Cookie、Token 与登录文件内容。</p>
             </div>
           </article>
         </div>
@@ -376,7 +381,7 @@
         <div>
           <span class="section-kicker">只读状态</span>
           <h2 id="device-detail-title">设备状态</h2>
-          <p id="device-detail-subtitle">仅读取，不会执行任何控制</p>
+          <p id="device-detail-subtitle">实时只读状态</p>
         </div>
         <button class="icon-button" type="button" data-close-device-detail aria-label="关闭">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>
@@ -392,7 +397,7 @@
           <div class="state-grid" id="device-state-grid"></div>
           <div class="readonly-note">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 1 5 5v2h2v13H5V9h2V7a5 5 0 0 1 5-5Zm3 7V7a3 3 0 0 0-6 0v2h6Z"/></svg>
-            此处仅展示只读状态，不包含开关、属性设置或动作入口。
+            此处展示设备实时只读状态。
           </div>
         </div>
         <div class="drawer-error" id="device-detail-error" hidden>
