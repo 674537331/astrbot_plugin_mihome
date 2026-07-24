@@ -104,6 +104,8 @@ const state = {
     diagnostics: false,
   },
   authTimer: null,
+  authStarting: false,
+  authStartPending: false,
   authPolling: false,
   authPollPending: false,
   authRequestId: 0,
@@ -177,6 +179,12 @@ function setButtonLoading(button, loading) {
   button.disabled = Boolean(loading);
   button.classList.toggle("is-loading", Boolean(loading));
   button.setAttribute("aria-busy", String(Boolean(loading)));
+}
+
+function setLoginButtonsBusy(busy) {
+  [$("#hero-login"), $("#account-login")].forEach((button) => {
+    setButtonLoading(button, busy);
+  });
 }
 
 function unwrapResponse(raw) {
@@ -452,7 +460,7 @@ function renderStatus() {
     state.sceneCacheTime = text(summary.scene_cache_updated_at).trim();
   }
   const loggedIn = isLoggedIn();
-  const running = isLoginRunning();
+  const running = state.authStarting || isLoginRunning();
   const loginError = redact(account.last_login_error || account.login_error || "");
   const errorScope = accountErrorScope(account, loginError);
   const presentation = accountPresentation({
@@ -482,7 +490,7 @@ function renderStatus() {
 
   $("#hero-login").hidden = loggedIn && !running;
   $("#account-login").hidden = loggedIn && !running;
-  $("#account-login").disabled = running;
+  setLoginButtonsBusy(running);
   $("#account-login").textContent = running ? "等待扫码确认" : "开始扫码登录";
   $("#account-logout").hidden = !loggedIn || running;
   if (running) {
@@ -557,21 +565,36 @@ function renderAuthPayload(payload = {}) {
 }
 
 async function startLogin() {
+  if (
+    state.authStarting
+    || state.authStartPending
+    || state.authPolling
+    || isLoginRunning()
+  ) return;
   const requestId = ++state.authRequestId;
   clearAuthPoll();
-  const buttons = [$("#hero-login"), $("#account-login")];
-  buttons.forEach((button) => setButtonLoading(button, true));
+  state.authStarting = true;
+  state.authStartPending = true;
+  setLoginButtonsBusy(true);
+  $("#account-logout").hidden = true;
   try {
     const payload = await apiPost(ENDPOINTS.authStart, {});
     if (requestId !== state.authRequestId) return;
+    state.authStartPending = false;
+    state.authStarting = true;
     renderAuthPayload(payload && typeof payload === "object" ? payload : {});
     showToast("登录流程已启动", "推荐使用小米账号“扫一扫”，米家或微信、QQ 也可扫码");
     scheduleAuthPoll(true);
   } catch (error) {
     if (requestId !== state.authRequestId) return;
-    showToast("无法启动登录", getErrorMessage(error), "error");
-  } finally {
-    buttons.forEach((button) => setButtonLoading(button, false));
+    state.authStartPending = false;
+    state.authStarting = true;
+    showToast(
+      "正在核对登录状态",
+      `${getErrorMessage(error)}；将继续查询当前扫码流程`,
+      "warning",
+    );
+    scheduleAuthPoll(true);
   }
 }
 
@@ -615,6 +638,7 @@ async function pollAuthStatus() {
       || requestId !== state.authRequestId
     ) return;
     const auth = payload && typeof payload === "object" ? payload : {};
+    if (!state.authStartPending) state.authStarting = false;
     renderAuthPayload(auth);
     state.status = {
       ...state.status,
@@ -624,7 +648,7 @@ async function pollAuthStatus() {
       },
     };
     renderStatus();
-    const running = isLoginRunning(auth);
+    const running = state.authStarting || isLoginRunning(auth);
     const loginStatus = text(auth.status).trim().toLowerCase();
     const terminalFailure = !running && [
       "error",
@@ -659,8 +683,12 @@ async function pollAuthStatus() {
       generation !== state.dataGeneration
       || requestId !== state.authRequestId
     ) return;
-    clearAuthPoll();
-    showToast("登录状态读取失败", getErrorMessage(error), "error");
+    shouldContinue = state.authStarting || isLoginRunning();
+    showToast(
+      "登录状态暂时无法读取",
+      `${getErrorMessage(error)}；将在后台自动重试`,
+      "warning",
+    );
   } finally {
     state.authPolling = false;
     const pending = state.authPollPending;
@@ -687,6 +715,9 @@ async function logout() {
   try {
     state.authRequestId += 1;
     clearAuthPoll();
+    state.authStarting = false;
+    state.authStartPending = false;
+    setLoginButtonsBusy(false);
     await apiPost(ENDPOINTS.authLogout, { confirm: "退出登录" });
     state.authQrRevision = "";
     $("#auth-qr-image").removeAttribute("src");

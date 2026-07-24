@@ -1053,6 +1053,13 @@ class WebUIStaticContractTests(unittest.TestCase):
         self.assertIn("shouldContinue = running", script)
         self.assertIn("authPolling: false", script)
         self.assertIn("authPollPending: false", script)
+        self.assertIn("authStarting: false", script)
+        self.assertIn("authStartPending: false", script)
+        self.assertIn("setLoginButtonsBusy(true)", script)
+        self.assertIn("正在核对登录状态", script)
+        self.assertIn("登录状态暂时无法读取", script)
+        self.assertIn("将在后台自动重试", script)
+        self.assertIn("scheduleAuthPoll(true)", script)
         self.assertIn("if (state.authPolling)", script)
         self.assertIn("state.authPolling = false", script)
         self.assertIn(
