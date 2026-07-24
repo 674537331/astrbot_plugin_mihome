@@ -54,6 +54,16 @@ class MijiaAPI413CompatibilityTests(unittest.TestCase):
             inspect.signature(self.device_class.run_action).parameters,
         )
 
+    def test_pinned_qr_login_hooks_are_available(self):
+        for method_name in (
+            "_get_qr_login_data",
+            "_complete_qr_login",
+        ):
+            self.assertTrue(
+                callable(getattr(self.api_class, method_name, None)),
+                f"mijiaAPI 缺少登录接口 {method_name}",
+            )
+
     def test_business_requests_do_not_start_qr_login(self):
         client_source = (ROOT / "mihome_client.py").read_text(encoding="utf-8")
         self.assertNotIn("self.api.login(", client_source)

@@ -58,6 +58,8 @@ const VIEW_META = Object.freeze({
   diagnostics: ["诊断", "检查账号、网络、缓存与配置健康状态"],
 });
 
+const SCAN_GUIDANCE = "推荐使用“设置 → 小米账号 → 右上角扫一扫”；米家等小米应用或微信、微博、QQ 也可扫码。";
+
 const ICON_PATHS = Object.freeze({
   device: "M7 2h10a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H7Z",
   scene: "M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3L18.7 8 12 11.7 5.3 8 12 4.3Z",
@@ -102,6 +104,10 @@ const state = {
     diagnostics: false,
   },
   authTimer: null,
+  authStarting: false,
+  authStartPending: false,
+  authPolling: false,
+  authPollPending: false,
   authRequestId: 0,
   authQrRevision: "",
   drawerRequestId: 0,
@@ -173,6 +179,12 @@ function setButtonLoading(button, loading) {
   button.disabled = Boolean(loading);
   button.classList.toggle("is-loading", Boolean(loading));
   button.setAttribute("aria-busy", String(Boolean(loading)));
+}
+
+function setLoginButtonsBusy(busy) {
+  [$("#hero-login"), $("#account-login")].forEach((button) => {
+    setButtonLoading(button, busy);
+  });
 }
 
 function unwrapResponse(raw) {
@@ -346,6 +358,95 @@ async function loadStatus() {
   return state.status;
 }
 
+function accountErrorScope(account, loginError = "") {
+  const scope = text(account && account.last_error_scope).trim();
+  if ([
+    "authorization",
+    "credential_storage",
+    "cloud_connection",
+    "login_flow",
+    "unknown",
+  ].includes(scope)) {
+    return scope;
+  }
+  if (bool(account && account.authorization_problem, false)) {
+    return "authorization";
+  }
+  return loginError ? "unknown" : "";
+}
+
+function accountPresentation({ loggedIn, running, loginError, errorScope }) {
+  if (running) {
+    return {
+      tone: "warning",
+      topLabel: "等待扫码",
+      metric: "登录进行中",
+      title: "等待扫码确认",
+      badge: "授权中",
+    };
+  }
+  if (errorScope === "authorization") {
+    return {
+      tone: "danger",
+      topLabel: loggedIn ? "授权已失效" : "授权未完成",
+      metric: loggedIn ? "需重新授权" : "未授权",
+      title: loggedIn ? "米家账号授权已失效" : "米家账号授权未完成",
+      badge: loggedIn ? "授权失效" : "授权未完成",
+    };
+  }
+  if (errorScope === "credential_storage") {
+    return {
+      tone: "danger",
+      topLabel: "凭证存储异常",
+      metric: "存储需检查",
+      title: "登录凭证存储需要检查",
+      badge: "存储异常",
+    };
+  }
+  if (errorScope === "cloud_connection") {
+    return {
+      tone: "warning",
+      topLabel: "云端连接异常",
+      metric: loggedIn ? "凭证已保存" : "未授权",
+      title: "米家云端连接需要检查",
+      badge: "连接异常",
+    };
+  }
+  if (errorScope === "login_flow") {
+    return {
+      tone: "warning",
+      topLabel: "登录未完成",
+      metric: loggedIn ? "凭证已保存" : "未授权",
+      title: "扫码登录尚未完成",
+      badge: "登录未完成",
+    };
+  }
+  if (loginError) {
+    return {
+      tone: "warning",
+      topLabel: "账号状态需检查",
+      metric: loggedIn ? "凭证已保存" : "未授权",
+      title: "米家账号状态需要检查",
+      badge: "需要检查",
+    };
+  }
+  return loggedIn
+    ? {
+      tone: "success",
+      topLabel: "凭证已保存",
+      metric: "已保存",
+      title: "账号凭证已保存",
+      badge: "凭证已保存",
+    }
+    : {
+      tone: "warning",
+      topLabel: "未登录",
+      metric: "未授权",
+      title: "尚未连接米家账号",
+      badge: "未登录",
+    };
+}
+
 function renderStatus() {
   const account = state.status.auth && typeof state.status.auth === "object"
     ? state.status.auth
@@ -359,50 +460,37 @@ function renderStatus() {
     state.sceneCacheTime = text(summary.scene_cache_updated_at).trim();
   }
   const loggedIn = isLoggedIn();
-  const running = isLoginRunning();
+  const running = state.authStarting || isLoginRunning();
   const loginError = redact(account.last_login_error || account.login_error || "");
+  const errorScope = accountErrorScope(account, loginError);
+  const presentation = accountPresentation({
+    loggedIn,
+    running,
+    loginError,
+    errorScope,
+  });
 
-  if (running) {
-    setTopStatus("warning", "等待扫码");
-    setText("#metric-account", "登录进行中");
-  } else if (loginError) {
-    setTopStatus("danger", "授权异常");
-    setText("#metric-account", loggedIn ? "凭证需检查" : "未授权");
-  } else if (loggedIn) {
-    setTopStatus("success", "凭证已保存");
-    setText("#metric-account", "已保存");
-  } else {
-    setTopStatus("warning", "未登录");
-    setText("#metric-account", "未授权");
-  }
+  setTopStatus(presentation.tone, presentation.topLabel);
+  setText("#metric-account", presentation.metric);
 
   setText("#metric-login-time", formatTime(account.last_login_at, loggedIn ? "已保存凭证" : "等待扫码登录"));
-  setText(
-    "#account-title",
-    running
-      ? "等待扫码确认"
-      : loginError
-        ? "米家账号状态需要检查"
-        : loggedIn
-          ? "账号凭证已保存"
-          : "尚未连接米家账号",
-  );
+  setText("#account-title", presentation.title);
   setText(
     "#account-description",
-    loginError || (running
-      ? "请使用米家 App 扫描二维码，并在手机中确认授权。"
-      : loggedIn
+    running
+      ? SCAN_GUIDANCE
+      : loginError || (loggedIn
         ? `最近登录：${formatTime(account.last_login_at)}`
         : "扫码授权后即可同步设备与场景。"),
   );
 
   const badge = $("#account-badge");
-  badge.className = `status-badge is-${running ? "warning" : loginError ? "danger" : loggedIn ? "success" : "neutral"}`;
-  badge.textContent = running ? "授权中" : loginError ? "异常" : loggedIn ? "凭证已保存" : "未登录";
+  badge.className = `status-badge is-${presentation.tone === "success" ? "success" : presentation.tone === "danger" ? "danger" : loggedIn || running || loginError ? "warning" : "neutral"}`;
+  badge.textContent = presentation.badge;
 
   $("#hero-login").hidden = loggedIn && !running;
   $("#account-login").hidden = loggedIn && !running;
-  $("#account-login").disabled = running;
+  setLoginButtonsBusy(running);
   $("#account-login").textContent = running ? "等待扫码确认" : "开始扫码登录";
   $("#account-logout").hidden = !loggedIn || running;
   if (running) {
@@ -471,44 +559,73 @@ function renderAuthPayload(payload = {}) {
   setText(
     "#auth-progress",
     redact(payload.message || payload.status_text || (
-      isLoginRunning(payload) ? "等待扫码与手机确认…" : "二维码生成后，请在米家 App 中确认授权。"
+      isLoginRunning(payload) ? "等待扫码与手机确认…" : SCAN_GUIDANCE
     )),
   );
 }
 
 async function startLogin() {
+  if (
+    state.authStarting
+    || state.authStartPending
+    || state.authPolling
+    || isLoginRunning()
+  ) return;
   const requestId = ++state.authRequestId;
   clearAuthPoll();
-  const buttons = [$("#hero-login"), $("#account-login")];
-  buttons.forEach((button) => setButtonLoading(button, true));
+  state.authStarting = true;
+  state.authStartPending = true;
+  setLoginButtonsBusy(true);
+  $("#account-logout").hidden = true;
   try {
     const payload = await apiPost(ENDPOINTS.authStart, {});
     if (requestId !== state.authRequestId) return;
+    state.authStartPending = false;
+    state.authStarting = true;
     renderAuthPayload(payload && typeof payload === "object" ? payload : {});
-    showToast("登录流程已启动", "请使用米家 App 扫码并确认授权");
+    showToast("登录流程已启动", "推荐使用小米账号“扫一扫”，米家或微信、QQ 也可扫码");
     scheduleAuthPoll(true);
   } catch (error) {
     if (requestId !== state.authRequestId) return;
-    showToast("无法启动登录", getErrorMessage(error), "error");
-  } finally {
-    buttons.forEach((button) => setButtonLoading(button, false));
+    state.authStartPending = false;
+    state.authStarting = true;
+    showToast(
+      "正在核对登录状态",
+      `${getErrorMessage(error)}；将继续查询当前扫码流程`,
+      "warning",
+    );
+    scheduleAuthPoll(true);
   }
 }
 
 function clearAuthPoll() {
   if (state.authTimer) window.clearTimeout(state.authTimer);
   state.authTimer = null;
+  state.authPollPending = false;
 }
 
 function scheduleAuthPoll(immediate = false) {
-  clearAuthPoll();
+  if (state.authTimer) window.clearTimeout(state.authTimer);
+  state.authTimer = null;
+  if (state.authPolling) {
+    state.authPollPending = true;
+    return;
+  }
+  state.authPollPending = false;
   const delay = immediate ? 300 : state.authQrRevision ? 3000 : 1800;
   state.authTimer = window.setTimeout(pollAuthStatus, delay);
 }
 
 async function pollAuthStatus() {
+  if (state.authPolling) {
+    state.authPollPending = true;
+    return;
+  }
+  state.authPolling = true;
+  state.authPollPending = false;
   const generation = state.dataGeneration;
   const requestId = state.authRequestId;
+  let shouldContinue = false;
   try {
     const payload = await apiGet(
       ENDPOINTS.authStatus,
@@ -521,6 +638,7 @@ async function pollAuthStatus() {
       || requestId !== state.authRequestId
     ) return;
     const auth = payload && typeof payload === "object" ? payload : {};
+    if (!state.authStartPending) state.authStarting = false;
     renderAuthPayload(auth);
     state.status = {
       ...state.status,
@@ -530,26 +648,52 @@ async function pollAuthStatus() {
       },
     };
     renderStatus();
-    if (isLoggedIn(auth) && !isLoginRunning(auth)) {
+    const running = state.authStarting || isLoginRunning(auth);
+    const loginStatus = text(auth.status).trim().toLowerCase();
+    const terminalFailure = !running && [
+      "error",
+      "timeout",
+      "qrcode_not_found",
+      "cancelled",
+    ].includes(loginStatus);
+    if (terminalFailure) {
+      clearAuthPoll();
+      showToast(
+        "登录未完成",
+        redact(auth.last_login_error || auth.detail || auth.error || auth.message),
+        "error",
+      );
+      return;
+    }
+    if (isLoggedIn(auth) && !running) {
       clearAuthPoll();
       $("#auth-panel").hidden = true;
       showToast("米家账号登录成功", "现在可以同步设备与场景");
       await awaitAll([loadDevices(false), loadScenes(false)]);
       return;
     }
-    if (auth.last_login_error || auth.error) {
+    if (!running && (auth.last_login_error || auth.error)) {
       clearAuthPoll();
       showToast("登录未完成", redact(auth.last_login_error || auth.error), "error");
       return;
     }
-    if (isLoginRunning(auth)) scheduleAuthPoll();
+    shouldContinue = running;
   } catch (error) {
     if (
       generation !== state.dataGeneration
       || requestId !== state.authRequestId
     ) return;
-    clearAuthPoll();
-    showToast("登录状态读取失败", getErrorMessage(error), "error");
+    shouldContinue = state.authStarting || isLoginRunning();
+    showToast(
+      "登录状态暂时无法读取",
+      `${getErrorMessage(error)}；将在后台自动重试`,
+      "warning",
+    );
+  } finally {
+    state.authPolling = false;
+    const pending = state.authPollPending;
+    state.authPollPending = false;
+    if (shouldContinue || pending) scheduleAuthPoll();
   }
 }
 
@@ -571,6 +715,9 @@ async function logout() {
   try {
     state.authRequestId += 1;
     clearAuthPoll();
+    state.authStarting = false;
+    state.authStartPending = false;
+    setLoginButtonsBusy(false);
     await apiPost(ENDPOINTS.authLogout, { confirm: "退出登录" });
     state.authQrRevision = "";
     $("#auth-qr-image").removeAttribute("src");
@@ -1595,14 +1742,19 @@ function defaultChecks() {
     : state.status.account && typeof state.status.account === "object"
       ? state.status.account
       : state.status;
+  const loginError = redact(account.last_login_error || account.login_error || "");
+  const errorScope = accountErrorScope(account, loginError);
+  const loggedIn = isLoggedIn();
+  const accountHasError = ["authorization", "credential_storage"].includes(errorScope);
+  const accountNeedsAttention = ["login_flow", "unknown"].includes(errorScope);
   return [
     {
       key: "account",
       title: "米家账号",
-      status: account.last_login_error ? "error" : isLoggedIn() ? "ok" : "warn",
-      message: account.last_login_error
-        ? redact(account.last_login_error)
-        : isLoggedIn()
+      status: accountHasError ? "error" : accountNeedsAttention ? "warn" : loggedIn ? "ok" : "warn",
+      message: accountHasError || accountNeedsAttention
+        ? loginError
+        : loggedIn
           ? "已检测到登录凭证"
           : "尚未完成扫码授权",
       icon: "cloud",
@@ -1626,8 +1778,8 @@ function defaultChecks() {
     {
       key: "network",
       title: "云端连接",
-      status: account.last_login_error ? "error" : isLoggedIn() ? "ok" : "warn",
-      message: account.last_login_error ? redact(account.last_login_error) : isLoggedIn() ? "未发现云端连接异常" : "登录后可检查云端连接",
+      status: errorScope === "cloud_connection" ? "warn" : loggedIn ? "ok" : "warn",
+      message: errorScope === "cloud_connection" ? loginError : loggedIn ? "未发现云端连接异常" : "登录后可检查云端连接",
       icon: "network",
     },
   ];
@@ -1675,8 +1827,16 @@ function normalizeDiagnostics(payload) {
     : state.status.account && typeof state.status.account === "object"
       ? state.status.account
       : state.status;
+  const loginError = redact(account.last_login_error || account.login_error || "");
+  const loginErrorTitle = {
+    authorization: "授权异常",
+    credential_storage: "凭证存储异常",
+    cloud_connection: "云端连接异常",
+    login_flow: "扫码登录异常",
+    unknown: "账号状态异常",
+  }[accountErrorScope(account, loginError)] || "账号状态异常";
   [
-    ["登录异常", account.last_login_error],
+    [loginErrorTitle, account.last_login_error],
     ["共享设备异常", account.last_shared_error],
     ["场景异常", account.last_scene_error],
   ].forEach(([title, message]) => {
