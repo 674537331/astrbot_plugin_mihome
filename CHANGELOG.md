@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## [v8.1.2] - 2026-08-03
+
+### 修复
+
+- 修复 v8.1.0 起三台设备（lemesh.light.wy0c02 / xiaomi.wifispeaker.l7a / yeelink.light.mono5）只读状态异常：共享设备列表兜底容错、DevProp/DevAction 构造跳过异常属性/动作，避免 KeyError 打断状态读取。
+- 规格拉取改用独立解析并回退 i18n 语言表（zh_cn -> en -> 空），修复 yeelink.light.mono5 等型号因缺少 i18n 文案导致规格拉取失败、只读状态报 MiHomeClientError 的问题。
+- 设备状态读取对 KeyError 与“云端查无此设备”输出明确诊断文案，不再暴露原始异常名。
+
 ## [v8.1.1] - 2026-07-24
 
 ### 修复
