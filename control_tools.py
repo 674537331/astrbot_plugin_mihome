@@ -512,6 +512,8 @@ class MiHomeControlTools:
             reason = str(error)
             if reason == "device_not_found":
                 return "米家云端找不到该设备。"
+            if reason == "device_directory_error":
+                return "米家设备列表响应异常，请稍后重新同步。"
             if reason == "cloud_no_response":
                 return "米家云端没有返回有效数据，请稍后重试。"
             if reason.startswith("cloud_rejected:"):

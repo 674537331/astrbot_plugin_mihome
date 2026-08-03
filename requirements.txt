@@ -1,2 +1,3 @@
 mijiaAPI==4.1.3
+httpx[socks]==0.28.1
 qrcode==8.2

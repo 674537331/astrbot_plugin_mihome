@@ -48,17 +48,22 @@ def _install_stubs():
 
     class _DevProp:
         def __init__(self, data):
-            self.description = data.get("description", "")
-            self.rw = data.get("rw", "")
-            self.type = data.get("type", "")
-            self.range = data.get("range")
+            self.name = data["name"]
+            self.desc = data["description"]
+            self.rw = data["rw"]
+            self.type = data["type"]
+            if self.type not in {"bool", "int", "uint", "float", "string"}:
+                raise ValueError("unsupported property type")
+            self.range = data["range"]
             self.value_list = data.get("value-list")
-            self.method = data.get("method", {})
+            self.method = data["method"]
+            self.unit = data.get("unit", "")
 
     class _DevAction:
         def __init__(self, data):
-            self.description = data.get("description", "")
-            self.method = data.get("method", {})
+            self.name = data["name"]
+            self.desc = data["description"]
+            self.method = data["method"]
 
     mijia.mijiaAPI = _API
     mijia.mijiaDevice = _Device
@@ -657,6 +662,136 @@ class ClientCompatibilityTests(unittest.TestCase):
             self.assertIs(cached_device, device)
             self.assertIsNot(refreshed_device, device)
             self.assertEqual(client.api.get_devices_list.call_count, 2)
+
+    def test_incompatible_spec_cache_is_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "broken.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "properties": [
+                            {
+                                "name": "on",
+                                "description": "开关",
+                                "type": "bool",
+                                "rw": "rw",
+                                "range": None,
+                            }
+                        ],
+                        "actions": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(
+                client_module.MiHomeClient._read_device_spec_cache(
+                    cache_path
+                )
+            )
+
+    def test_owned_device_does_not_query_shared_directory(self):
+        client = object.__new__(client_module.MiHomeClient)
+        get_shared = MagicMock(
+            side_effect=client_module.RequestsTimeout("should not run")
+        )
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(
+                return_value=[
+                    {
+                        "did": "owned-did",
+                        "name": "自有设备",
+                        "model": "example.switch.v1",
+                    }
+                ]
+            ),
+            get_shared_devices_list=get_shared,
+        )
+        client._load_or_fetch_device_spec = MagicMock(
+            return_value={
+                "name": "测试设备",
+                "properties": [],
+                "actions": [],
+            }
+        )
+
+        device = client._prepare_device_sync("owned-did")
+
+        self.assertEqual(device.did, "owned-did")
+        get_shared.assert_not_called()
+
+    def test_shared_directory_key_error_is_not_device_not_found(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=[]),
+            get_shared_devices_list=MagicMock(side_effect=KeyError("list")),
+        )
+
+        with self.assertRaises(
+            client_module.MiHomeDeviceDirectoryError
+        ) as raised:
+            client._prepare_device_sync("shared-did")
+
+        self.assertIn("共享设备列表响应结构异常", str(raised.exception))
+        self.assertNotIsInstance(
+            raised.exception,
+            client_module.DeviceNotFoundError,
+        )
+
+    def test_shared_directory_timeout_keeps_network_semantics(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=[]),
+            get_shared_devices_list=MagicMock(
+                side_effect=client_module.RequestsTimeout("timeout")
+            ),
+        )
+
+        with self.assertRaises(client_module.RequestsTimeout):
+            client._prepare_device_sync("shared-did")
+
+    def test_unsupported_spec_item_does_not_hide_valid_capabilities(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(
+                return_value=[
+                    {
+                        "did": "did-1",
+                        "name": "混合规格设备",
+                        "model": "example.mixed.v1",
+                    }
+                ]
+            )
+        )
+        client._load_or_fetch_device_spec = MagicMock(
+            return_value={
+                "name": "混合规格设备",
+                "properties": [
+                    {
+                        "name": "on",
+                        "description": "开关",
+                        "type": "bool",
+                        "rw": "rw",
+                        "range": None,
+                        "method": {"siid": 2, "piid": 1},
+                    },
+                    {
+                        "name": "unsupported",
+                        "description": "未知类型",
+                        "type": "object",
+                        "rw": "r",
+                        "range": None,
+                        "method": {"siid": 2, "piid": 2},
+                    },
+                ],
+                "actions": [],
+            }
+        )
+
+        device = client._prepare_device_sync("did-1")
+
+        self.assertIn("on", device.prop_list)
+        self.assertNotIn("unsupported", device.prop_list)
 
     def test_prepared_device_cache_is_bounded_and_scoped_to_api(self):
         devices = [
@@ -1693,6 +1828,45 @@ class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(capability, expected)
         self.assertEqual(status, expected)
 
+    async def test_directory_error_has_stable_capability_and_status_diagnostic(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+        client.api = types.SimpleNamespace()
+        client._prepare_device_sync = MagicMock(
+            side_effect=client_module.MiHomeDeviceDirectoryError(
+                "共享设备列表响应结构异常，请稍后重新同步"
+            )
+        )
+
+        capability = await client.get_device_capabilities("did")
+        status = await client.get_device_props("did", ["temperature"])
+
+        expected = {
+            "__error__": "共享设备列表响应结构异常，请稍后重新同步"
+        }
+        self.assertEqual(capability, expected)
+        self.assertEqual(status, expected)
+
+    async def test_missing_device_has_actionable_read_diagnostic(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+        client.api = types.SimpleNamespace()
+        client._prepare_device_sync = MagicMock(
+            side_effect=client_module.DeviceNotFoundError("did")
+        )
+
+        capability = await client.get_device_capabilities("did")
+        status = await client.get_device_props("did", ["temperature"])
+
+        self.assertIn("重新同步设备", capability["__error__"])
+        self.assertIn("检查别名或 DID", status["__error__"])
+
     async def test_sync_error_does_not_expose_upstream_secret_text(self):
         secret = "https://example.invalid/?serviceToken=secret-value"
 
@@ -1766,6 +1940,7 @@ class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
         cases = {
             "invalid_value_or_capability": "属性值",
             "action_schema_missing:play": "动作规格",
+            "device_directory_error": "设备列表响应异常",
             "internal_error": "内部错误",
         }
         for reason, expected in cases.items():
