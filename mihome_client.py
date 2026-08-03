@@ -92,6 +92,10 @@ class MiHomeClientError(Exception):
     pass
 
 
+class MiHomeDeviceDirectoryError(MiHomeClientError):
+    """米家设备目录无法可靠读取，不能据此判定设备不存在。"""
+
+
 class MiHomeAuthError(MiHomeClientError):
     pass
 
@@ -580,6 +584,58 @@ class MiHomeClient:
         return f" {unit}"
 
     @staticmethod
+    def _device_spec_has_compatible_schema(spec: Any) -> bool:
+        """确认缓存可由固定版本 mijiaAPI 的 DevProp/DevAction 消费。"""
+
+        if (
+            not isinstance(spec, dict)
+            or not isinstance(spec.get("properties"), list)
+            or not isinstance(spec.get("actions"), list)
+        ):
+            return False
+
+        def has_integer_method(
+            item: Any,
+            *method_keys: str,
+        ) -> bool:
+            if not isinstance(item, dict):
+                return False
+            method = item.get("method")
+            return isinstance(method, dict) and all(
+                isinstance(method.get(key), int)
+                and not isinstance(method.get(key), bool)
+                for key in method_keys
+            )
+
+        required_prop_keys = {
+            "name",
+            "description",
+            "type",
+            "rw",
+            "range",
+            "method",
+        }
+        for prop in spec["properties"]:
+            if (
+                not isinstance(prop, dict)
+                or not str(prop.get("name", "")).strip()
+                or not required_prop_keys.issubset(prop)
+                or not has_integer_method(prop, "siid", "piid")
+            ):
+                return False
+
+        required_action_keys = {"name", "description", "method"}
+        for action in spec["actions"]:
+            if (
+                not isinstance(action, dict)
+                or not str(action.get("name", "")).strip()
+                or not required_action_keys.issubset(action)
+                or not has_integer_method(action, "siid", "aiid")
+            ):
+                return False
+        return True
+
+    @staticmethod
     def _read_device_spec_cache(cache_path: Path) -> Optional[Dict[str, Any]]:
         if cache_path.is_symlink():
             raise MiHomeClientError("设备规格缓存路径类型异常")
@@ -592,11 +648,7 @@ class MiHomeClient:
                 spec = json.load(file)
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             return None
-        if (
-            not isinstance(spec, dict)
-            or not isinstance(spec.get("properties"), list)
-            or not isinstance(spec.get("actions"), list)
-        ):
+        if not MiHomeClient._device_spec_has_compatible_schema(spec):
             return None
         return spec
 
@@ -664,6 +716,29 @@ class MiHomeClient:
         except OSError as exc:
             raise MiHomeClientError("设备规格缓存写入失败") from exc
 
+    @staticmethod
+    def _read_device_directory(
+        getter: Callable[[], Any],
+        source_label: str,
+    ) -> List[Dict[str, Any]]:
+        """读取设备目录；结构异常不能降级为 DeviceNotFoundError。"""
+
+        try:
+            rows = getter()
+        except KeyError as exc:
+            logger.warning(
+                f"[MiHome] {source_label}响应结构异常: {type(exc).__name__}"
+            )
+            raise MiHomeDeviceDirectoryError(
+                f"{source_label}响应结构异常，请稍后重新同步"
+            ) from exc
+        if not isinstance(rows, list):
+            logger.warning(f"[MiHome] {source_label}返回类型异常")
+            raise MiHomeDeviceDirectoryError(
+                f"{source_label}响应结构异常，请稍后重新同步"
+            )
+        return rows
+
     def _prepare_device_sync(self, did: str):
         # 业务请求前不能调用 login()；凭证失效时，上游 login() 可能进入
         # 120 秒扫码长轮询。这里只使用有界的设备列表请求和规格子进程。
@@ -681,9 +756,10 @@ class MiHomeClient:
                 return cached_device
             cache.pop(target_did, None)
 
-        devices = self.api.get_devices_list()
-        if not isinstance(devices, list):
-            devices = []
+        devices = self._read_device_directory(
+            self.api.get_devices_list,
+            "自有设备列表",
+        )
         matches = [
             item
             for item in devices
@@ -697,9 +773,10 @@ class MiHomeClient:
                 None,
             )
             if callable(get_shared_devices):
-                shared_devices = get_shared_devices()
-                if not isinstance(shared_devices, list):
-                    shared_devices = []
+                shared_devices = self._read_device_directory(
+                    get_shared_devices,
+                    "共享设备列表",
+                )
                 matches = [
                     item
                     for item in shared_devices
@@ -723,10 +800,19 @@ class MiHomeClient:
         )
         device.sleep_time = 1.0
         device.prop_list = {}
+        skipped_properties = 0
         for prop in spec.get("properties", []):
             if not isinstance(prop, dict) or not prop.get("name"):
                 continue
-            prop_obj = DevProp(prop)
+            try:
+                prop_obj = DevProp(prop)
+            except (KeyError, TypeError, ValueError) as exc:
+                skipped_properties += 1
+                logger.debug(
+                    "[MiHome] 跳过不兼容设备属性: "
+                    f"model={model}, error={type(exc).__name__}"
+                )
+                continue
             base_name = str(prop["name"])
             prop_name = base_name
             if prop_name in device.prop_list:
@@ -743,10 +829,19 @@ class MiHomeClient:
                 )
 
         device.action_list = {}
+        skipped_actions = 0
         for action in spec.get("actions", []):
             if not isinstance(action, dict) or not action.get("name"):
                 continue
-            action_obj = DevAction(action)
+            try:
+                action_obj = DevAction(action)
+            except (KeyError, TypeError, ValueError) as exc:
+                skipped_actions += 1
+                logger.debug(
+                    "[MiHome] 跳过不兼容设备动作: "
+                    f"model={model}, error={type(exc).__name__}"
+                )
+                continue
             base_name = str(action["name"])
             action_name = base_name
             if action_name in device.action_list:
@@ -756,6 +851,13 @@ class MiHomeClient:
                     f"{method.get('aiid', 'x')}"
                 )
             device.action_list[action_name] = action_obj
+
+        if skipped_properties or skipped_actions:
+            logger.warning(
+                "[MiHome] 设备规格包含不兼容项，已跳过: "
+                f"model={model}, properties={skipped_properties}, "
+                f"actions={skipped_actions}"
+            )
 
         cache[target_did] = (time.monotonic(), self.api, device)
         cache.move_to_end(target_did)
@@ -1430,12 +1532,26 @@ class MiHomeClient:
 
         except (asyncio.TimeoutError, RequestsTimeout):
             return {"__error__": "请求超时 (设备离线或深度休眠)"}
+        except DeviceNotFoundError:
+            return {
+                "__error__": (
+                    "云端设备列表中未找到该设备，请重新同步设备并检查别名或 DID"
+                )
+            }
+        except MiHomeDeviceDirectoryError as exc:
+            return {"__error__": str(exc)}
         except DeviceGetError:
             return {"__error__": "设备拒绝读取能力菜单"}
         except LoginError:
             return {"__error__": "鉴权失效"}
         except json.JSONDecodeError:
             return {"__error__": "米家云端没有返回有效数据，请稍后重试"}
+        except RequestException:
+            return {"__error__": "网络异常，请稍后重试"}
+        except APIError:
+            return {"__error__": "米家云端接口异常，请稍后重试"}
+        except KeyError:
+            return {"__error__": "云端响应结构异常，请稍后重试"}
         except Exception as e:
             return {"__error__": f"接口异常:{type(e).__name__}"}
 
@@ -1581,12 +1697,26 @@ class MiHomeClient:
 
         except (asyncio.TimeoutError, RequestsTimeout):
             return {"__error__": "请求超时 (设备离线或深度休眠)"}
+        except DeviceNotFoundError:
+            return {
+                "__error__": (
+                    "云端设备列表中未找到该设备，请重新同步设备并检查别名或 DID"
+                )
+            }
+        except MiHomeDeviceDirectoryError as exc:
+            return {"__error__": str(exc)}
         except DeviceGetError:
             return {"__error__": "设备拒绝读取状态"}
         except LoginError:
             return {"__error__": "鉴权失效"}
         except json.JSONDecodeError:
             return {"__error__": "米家云端没有返回有效数据，请稍后重试"}
+        except RequestException:
+            return {"__error__": "网络异常，请稍后重试"}
+        except APIError:
+            return {"__error__": "米家云端接口异常，请稍后重试"}
+        except KeyError:
+            return {"__error__": "云端响应结构异常，请稍后重试"}
         except Exception as e:
             return {"__error__": f"接口异常:{type(e).__name__}"}
 
@@ -1777,6 +1907,12 @@ class MiHomeClient:
         elif isinstance(e, DeviceNotFoundError):
             self.data_manager.update_state(last_control_error="DID不存在", last_control_device=device_name)
             raise MiHomeControlError("device_not_found") from e
+        elif isinstance(e, MiHomeDeviceDirectoryError):
+            self.data_manager.update_state(
+                last_control_error="设备目录响应异常",
+                last_control_device=device_name,
+            )
+            raise MiHomeControlError("device_directory_error") from e
         elif isinstance(e, (DeviceSetError, DeviceActionError)):
             self.data_manager.update_state(last_control_error="设备拒绝", last_control_device=device_name)
             raise MiHomeControlError("device_rejected") from e

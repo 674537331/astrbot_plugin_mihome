@@ -33,6 +33,9 @@ python -m pip install -r requirements.txt
 python tools/maintenance/check_project.py --all
 ```
 
+Ruff 检查显式固定为核心错误规则 `E4,E7,E9,F`，避免 Ruff 版本升级改变
+默认规则后把历史风格差异误判为发布阻断。
+
 `--all` 会额外运行单元测试与 Ruff。也可以分别使用 `--tests` 或 `--ruff`。
 单元测试会确认当前环境安装的 `mijiaAPI` 与固定版本一致，因此应先在隔离的测试
 环境中安装项目依赖；旧依赖导致检查失败是预期的保护行为。

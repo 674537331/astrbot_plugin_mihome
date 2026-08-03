@@ -43,6 +43,7 @@ SENSITIVE_FILENAMES = {
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 NODE_ENV = "MIHOME_NODE"
 RUFF_ENV = "MIHOME_RUFF"
+RUFF_RULES = "E4,E7,E9,F"
 
 
 @dataclass(frozen=True)
@@ -286,9 +287,17 @@ def run_tests() -> Result:
 def run_ruff(require_tool: bool) -> Result:
     ruff = configured_tool("ruff", RUFF_ENV)
     if ruff:
-        command = [ruff, "check", "."]
+        command = [ruff, "check", "--select", RUFF_RULES, "."]
     elif importlib.util.find_spec("ruff") is not None:
-        command = [sys.executable, "-m", "ruff", "check", "."]
+        command = [
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            "--select",
+            RUFF_RULES,
+            ".",
+        ]
     else:
         state = "FAIL" if require_tool else "SKIP"
         return Result("Ruff", state, "当前 Python 环境未安装 Ruff")
