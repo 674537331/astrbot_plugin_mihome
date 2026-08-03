@@ -691,17 +691,28 @@ class MiHomeClient:
             and str(item.get("did", "")).strip() == target_did
         ]
         if not matches:
-            get_shared_devices = getattr(
-                self.api,
-                "get_shared_devices_list",
-                None,
-            )
-            if callable(get_shared_devices):
-                shared_devices = get_shared_devices()
-                if not isinstance(shared_devices, list):
-                    shared_devices = []
-                matches = [
-                    item
+            shared_devices = []
+            try:
+                get_shared_devices = getattr(
+                    self.api,
+                    "get_shared_devices_list",
+                    None,
+                )
+                if callable(get_shared_devices):
+                    shared_devices = get_shared_devices()
+            except Exception as e:
+                # 上游共享列表接口对部分账号会返回缺失 key 的响应
+                # （如 KeyError: 'list'）。这里与 get_devices() 保持一致的
+                # 容错策略：记录日志并视为无共享设备，避免只读状态整条链路
+                # 被一个共享列表异常打断。
+                logger.warning(
+                    f"[MiHome] 共享设备列表获取异常: {type(e).__name__}"
+                )
+                shared_devices = []
+            if not isinstance(shared_devices, list):
+                shared_devices = []
+            matches = [
+                item
                     for item in shared_devices
                     if isinstance(item, dict)
                     and str(item.get("did", "")).strip() == target_did
@@ -726,7 +737,16 @@ class MiHomeClient:
         for prop in spec.get("properties", []):
             if not isinstance(prop, dict) or not prop.get("name"):
                 continue
-            prop_obj = DevProp(prop)
+            try:
+                prop_obj = DevProp(prop)
+            except (KeyError, TypeError, ValueError) as e:
+                # 个别型号的规格可能缺少 rw/method 等字段或带未知类型，
+                # 单独跳过该属性即可，不应让整台设备的只读状态崩溃。
+                logger.debug(
+                    f"[MiHome] 跳过异常属性 {prop.get('name')!r}: "
+                    f"{type(e).__name__}"
+                )
+                continue
             base_name = str(prop["name"])
             prop_name = base_name
             if prop_name in device.prop_list:
@@ -746,7 +766,14 @@ class MiHomeClient:
         for action in spec.get("actions", []):
             if not isinstance(action, dict) or not action.get("name"):
                 continue
-            action_obj = DevAction(action)
+            try:
+                action_obj = DevAction(action)
+            except (KeyError, TypeError, ValueError) as e:
+                logger.debug(
+                    f"[MiHome] 跳过异常动作 {action.get('name')!r}: "
+                    f"{type(e).__name__}"
+                )
+                continue
             base_name = str(action["name"])
             action_name = base_name
             if action_name in device.action_list:
@@ -1432,10 +1459,25 @@ class MiHomeClient:
             return {"__error__": "请求超时 (设备离线或深度休眠)"}
         except DeviceGetError:
             return {"__error__": "设备拒绝读取能力菜单"}
+        except DeviceNotFoundError:
+            return {
+                "__error__": (
+                    "设备未在米家云端设备列表中找到，请先在米家管理中"
+                    "重新同步设备并核对别名与 DID 配置"
+                )
+            }
         except LoginError:
             return {"__error__": "鉴权失效"}
         except json.JSONDecodeError:
             return {"__error__": "米家云端没有返回有效数据，请稍后重试"}
+        except KeyError:
+            # 上游对部分型号/接口会返回缺少 key 的响应（如 'code'、'list'），
+            # 显式给出可理解的诊断，而不是暴露原始异常名。
+            return {
+                "__error__": (
+                    "云端响应结构异常（KeyError），接口返回不完整，请稍后重试"
+                )
+            }
         except Exception as e:
             return {"__error__": f"接口异常:{type(e).__name__}"}
 
@@ -1583,10 +1625,23 @@ class MiHomeClient:
             return {"__error__": "请求超时 (设备离线或深度休眠)"}
         except DeviceGetError:
             return {"__error__": "设备拒绝读取状态"}
+        except DeviceNotFoundError:
+            return {
+                "__error__": (
+                    "设备未在米家云端设备列表中找到，请先在米家管理中"
+                    "重新同步设备并核对别名与 DID 配置"
+                )
+            }
         except LoginError:
             return {"__error__": "鉴权失效"}
         except json.JSONDecodeError:
             return {"__error__": "米家云端没有返回有效数据，请稍后重试"}
+        except KeyError:
+            return {
+                "__error__": (
+                    "云端响应结构异常（KeyError），接口返回不完整，请稍后重试"
+                )
+            }
         except Exception as e:
             return {"__error__": f"接口异常:{type(e).__name__}"}
 

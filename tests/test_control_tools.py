@@ -48,17 +48,27 @@ def _install_stubs():
 
     class _DevProp:
         def __init__(self, data):
-            self.description = data.get("description", "")
-            self.rw = data.get("rw", "")
-            self.type = data.get("type", "")
-            self.range = data.get("range")
-            self.value_list = data.get("value-list")
-            self.method = data.get("method", {})
+            # 与 mijiaAPI 4.1.3 DevProp 保持一致的严格取键行为，
+            # 以覆盖插件对缺失字段属性的跳过逻辑。
+            self.name = data["name"]
+            self.desc = data["description"]
+            self.type = data["type"]
+            if self.type not in ["bool", "int", "uint", "float", "string"]:
+                raise ValueError(
+                    f"不支持的类型: {self.type}, 可选类型: "
+                    "bool, int, uint, float, string"
+                )
+            self.rw = data["rw"]
+            self.range = data["range"]
+            self.value_list = data.get("value-list", None)
+            self.method = data["method"]
 
     class _DevAction:
         def __init__(self, data):
-            self.description = data.get("description", "")
-            self.method = data.get("method", {})
+            # 与 mijiaAPI 4.1.3 DevAction 保持一致的严格取键行为。
+            self.name = data["name"]
+            self.desc = data["description"]
+            self.method = data["method"]
 
     mijia.mijiaAPI = _API
     mijia.mijiaDevice = _Device
@@ -707,6 +717,92 @@ class ClientCompatibilityTests(unittest.TestCase):
         self.assertIs(refreshed.api, client.api)
         self.assertIsNot(refreshed.api, previous_api)
         client.api.get_devices_list.assert_called_once_with()
+
+    def test_shared_list_key_error_degrades_to_device_not_found(self):
+        # 上游共享列表接口对部分账号返回缺少 key 的响应（KeyError: 'list'），
+        # 只读状态准备阶段应容错而不是把 KeyError 抛给调用方。
+        client = object.__new__(client_module.MiHomeClient)
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=[]),
+            get_shared_devices_list=MagicMock(side_effect=KeyError("list")),
+        )
+        client._load_or_fetch_device_spec = MagicMock()
+
+        with self.assertRaises(client_module.DeviceNotFoundError):
+            client._prepare_device_sync("shared-did")
+
+        client.api.get_devices_list.assert_called_once_with()
+        client.api.get_shared_devices_list.assert_called_once_with()
+        client._load_or_fetch_device_spec.assert_not_called()
+
+    def test_shared_list_network_error_degrades_to_device_not_found(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(return_value=[]),
+            get_shared_devices_list=MagicMock(
+                side_effect=client_module.RequestsTimeout("offline")
+            ),
+        )
+        client._load_or_fetch_device_spec = MagicMock()
+
+        with self.assertRaises(client_module.DeviceNotFoundError):
+            client._prepare_device_sync("shared-did")
+
+        client.api.get_shared_devices_list.assert_called_once_with()
+
+    def test_malformed_spec_property_is_skipped_not_fatal(self):
+        # 个别型号规格属性缺少 rw/method 等字段或带未知类型，
+        # 应跳过该属性而不是让整台设备的状态读取崩溃。
+        client = object.__new__(client_module.MiHomeClient)
+        client.api = types.SimpleNamespace(
+            get_devices_list=MagicMock(
+                return_value=[
+                    {
+                        "did": "did-1",
+                        "name": "异常设备",
+                        "model": "example.odd.v1",
+                    }
+                ]
+            )
+        )
+        client._load_or_fetch_device_spec = MagicMock(
+            return_value={
+                "name": "异常设备",
+                "properties": [
+                    {
+                        "name": "on",
+                        "description": "开关",
+                        "type": "bool",
+                        "rw": "rw",
+                        "range": None,
+                        "value-list": None,
+                        "method": {"siid": 2, "piid": 1},
+                    },
+                    {
+                        "name": "broken",
+                        # 缺少 description/type/rw/range/method，DevProp 应被跳过
+                    },
+                ],
+                "actions": [
+                    {
+                        "name": "toggle",
+                        "description": "切换",
+                        "method": {"siid": 2, "aiid": 1},
+                    },
+                    {
+                        "name": "broken-action",
+                        # 缺少 method，DevAction 应被跳过
+                    },
+                ],
+            }
+        )
+
+        device = client._prepare_device_sync("did-1")
+
+        self.assertIn("on", device.prop_list)
+        self.assertNotIn("broken", device.prop_list)
+        self.assertIn("toggle", device.action_list)
+        self.assertNotIn("broken-action", device.action_list)
 
 
 class DataManagerCredentialTests(unittest.TestCase):
@@ -1628,6 +1724,49 @@ class ClientCloudResultTests(unittest.IsolatedAsyncioTestCase):
             client.api.run_action.call_args.args[0]["aiid"],
             1,
         )
+
+    async def test_key_error_from_upstream_becomes_clear_diagnostic(self):
+        # 上游对部分型号/接口会返回缺少 key 的响应并抛出 KeyError；
+        # 插件不应把“接口异常:KeyError”直接暴露给用户。
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+        client.api = types.SimpleNamespace()
+        client._prepare_device_sync = MagicMock(side_effect=KeyError("code"))
+
+        capabilities = await client.get_device_capabilities("did")
+        status = await client.get_device_props("did", ["temperature"])
+
+        expected = {
+            "__error__": "云端响应结构异常（KeyError），接口返回不完整，请稍后重试"
+        }
+        self.assertEqual(capabilities, expected)
+        self.assertEqual(status, expected)
+
+    async def test_device_not_found_becomes_clear_diagnostic(self):
+        client = object.__new__(client_module.MiHomeClient)
+        client._login_status = client_module.LOGIN_IDLE
+        client._api_lock = asyncio.Lock()
+        client.data_manager = MagicMock()
+        client.data_manager.auth_exists.return_value = True
+        client.api = types.SimpleNamespace()
+        client._prepare_device_sync = MagicMock(
+            side_effect=client_module.DeviceNotFoundError("gone")
+        )
+
+        capabilities = await client.get_device_capabilities("did")
+        status = await client.get_device_props("did", ["temperature"])
+
+        expected = {
+            "__error__": (
+                "设备未在米家云端设备列表中找到，请先在米家管理中"
+                "重新同步设备并核对别名与 DID 配置"
+            )
+        }
+        self.assertEqual(capabilities, expected)
+        self.assertEqual(status, expected)
 
     async def test_shared_device_capabilities_use_shared_directory_fallback(self):
         client = object.__new__(client_module.MiHomeClient)
