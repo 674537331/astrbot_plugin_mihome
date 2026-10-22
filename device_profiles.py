@@ -17,6 +17,7 @@ CATEGORY_WATER_HEATER = "热水器类别"
 CATEGORY_ROUTER = "路由器类别"
 CATEGORY_SPEAKER = "音箱类别"
 CATEGORY_SWITCH = "开关类别"
+CATEGORY_PLUG = "插座类别"
 CATEGORY_DOOR_SENSOR = "门磁传感器类别"
 CATEGORY_GAS_SENSOR = "燃气传感器类别"
 
@@ -34,6 +35,7 @@ VALID_CATEGORIES = {
     CATEGORY_ROUTER,
     CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
+    CATEGORY_PLUG,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
 }
@@ -792,6 +794,23 @@ CATEGORY_PROFILES = {
         "help_hints": {},
     },
 
+    CATEGORY_PLUG: {
+        "prop_map": {"开关": "on"},
+        "value_map": {"开": True, "关": False},
+        "display_map": {
+            "on": "插座电源",
+            "electric_power": "实时功率",
+            "power_consumption": "用电量",
+        },
+        "detail_writable": ["on"],
+        "detail_readable": ["on", "electric_power", "power_consumption"],
+        "detail_actions": [],
+        "action_map": {},
+        "help_examples": {"开关": ["开", "关"]},
+        "action_examples": [],
+        "help_hints": {},
+    },
+
     CATEGORY_DOOR_SENSOR: {
         "prop_map": {},
         "value_map": {},
@@ -862,6 +881,63 @@ CATEGORY_PROFILES = {
 # 🎯 型号精确模板库
 # ==========================================
 MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
+    # Issue #20: names and units verified against the supplied public MIoT spec.
+    "cuco.plug.v3": {
+        "category": CATEGORY_PLUG,
+        "hidden_props": [],
+        "prop_map": {
+            "开关": "on",
+            "童锁": "physical_controls_locked",
+            "指示灯": "indicator_light_on",
+            "上电状态": "default_power_on_state",
+        },
+        "value_map": {"开": True, "关": False, "开启": True, "关闭": False},
+        "property_value_map": {
+            "default_power_on_state": {"恢复断电前状态": 0, "上电打开": 1, "上电关闭": 2},
+        },
+        "display_map": {
+            "on": "插座电源",
+            "electric_power": "实时功率",
+            "power_consumption": "用电量",
+            "temperature": "设备温度",
+            "fault": "故障状态",
+            "physical_controls_locked": "童锁",
+            "indicator_light_on": "指示灯",
+            "default_power_on_state": "上电状态",
+        },
+        "value_display_map": {
+            "on": {True: "开启", False: "关闭"},
+            "physical_controls_locked": {True: "开启", False: "关闭"},
+            "indicator_light_on": {True: "开启", False: "关闭"},
+            "default_power_on_state": {0: "恢复断电前状态", 1: "上电打开", 2: "上电关闭"},
+            "fault": {0: "无故障", 1: "过温", 2: "过载"},
+        },
+        # These units are in the model's descriptions, not DevProp.unit.
+        # Do not apply the centi-kWh conversion to other plug models.
+        "readable_value_formats": {
+            "power_consumption": {"scale": 0.01, "suffix": " kWh"},
+            "electric_power": {"scale": 1, "suffix": " W"},
+            "temperature": {"scale": 1, "suffix": "°C"},
+        },
+        "detail_writable": [
+            "on", "physical_controls_locked", "indicator_light_on",
+            "default_power_on_state",
+        ],
+        "detail_readable": [
+            "on", "electric_power", "power_consumption", "temperature", "fault",
+            "physical_controls_locked", "indicator_light_on", "default_power_on_state",
+        ],
+        "detail_actions": ["toggle"],
+        "action_map": {"切换": "toggle"},
+        "help_examples": {
+            "童锁": ["开", "关"],
+            "指示灯": ["开", "关"],
+            "上电状态": ["恢复断电前状态", "上电打开", "上电关闭"],
+        },
+        "action_examples": ["切换"],
+        "help_hints": {"上电状态": "设置插座重新上电后的电源状态"},
+    },
+
     "careli.fryer.maf07c": {
         "category": CATEGORY_AIR_FRYER,
         "hidden_props": [],

@@ -1,0 +1,436 @@
+{
+  "name": "米家智能插座3",
+  "model": "cuco.plug.v3",
+  "properties": [
+    {
+      "name": "on",
+      "description": "Switch Status / 开关",
+      "type": "bool",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 2,
+        "piid": 1
+      }
+    },
+    {
+      "name": "default-power-on-state",
+      "description": "Default Power On State / 默认上电状态，0:恢复断电前状态；1:上电打开；2:上电关闭",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        0,
+        2,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 2,
+        "piid": 2
+      }
+    },
+    {
+      "name": "fault",
+      "description": "Device Fault / 故障",
+      "type": "uint",
+      "rw": "r",
+      "range": null,
+      "value-list": [
+        {
+          "value": 0,
+          "description": "No Faults",
+          "desc_zh_cn": "无故障"
+        },
+        {
+          "value": 1,
+          "description": "Over Temperature",
+          "desc_zh_cn": "过温"
+        },
+        {
+          "value": 2,
+          "description": "Overload",
+          "desc_zh_cn": "过载"
+        }
+      ],
+      "method": {
+        "siid": 2,
+        "piid": 3
+      }
+    },
+    {
+      "name": "physical-controls-locked",
+      "description": "Physical Control Locked / 物理控制锁",
+      "type": "bool",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 7,
+        "piid": 1
+      }
+    },
+    {
+      "name": "power-consumption",
+      "description": "Power Consumption / 耗电量（单位:0,01Kwh）",
+      "type": "uint",
+      "rw": "r",
+      "range": [
+        0,
+        65535,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 11,
+        "piid": 1
+      }
+    },
+    {
+      "name": "electric-power",
+      "description": "Electric Power / 电功率（单位：1W）",
+      "type": "float",
+      "rw": "r",
+      "range": [
+        0,
+        10000,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 11,
+        "piid": 2
+      }
+    },
+    {
+      "name": "indicator-light-on",
+      "description": "Switch Status / 开关",
+      "type": "bool",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 13,
+        "piid": 1
+      }
+    },
+    {
+      "name": "mode",
+      "description": "mode / 勿扰模式",
+      "type": "bool",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 3,
+        "piid": 2
+      }
+    },
+    {
+      "name": "start-time",
+      "description": "start-time / 开启时间",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        0,
+        1440,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 3,
+        "piid": 3
+      }
+    },
+    {
+      "name": "end-time",
+      "description": "end-time / 结束时间",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        0,
+        1440,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 3,
+        "piid": 4
+      }
+    },
+    {
+      "name": "charging-protection-on",
+      "description": "on / 开关",
+      "type": "bool",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 4,
+        "piid": 1
+      }
+    },
+    {
+      "name": "power",
+      "description": "power / 功率阈值",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        2,
+        10,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 4,
+        "piid": 2
+      }
+    },
+    {
+      "name": "protect-time",
+      "description": "protect-time / 保护时长",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        1,
+        10,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 4,
+        "piid": 3
+      }
+    },
+    {
+      "name": "status",
+      "description": "status / 状态，true：启用中；false：未启用",
+      "type": "bool",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 5,
+        "piid": 1
+      }
+    },
+    {
+      "name": "data-value",
+      "description": "data-value / 开启时长;关闭时长;日期;开始时间;结束时间",
+      "type": "string",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 5,
+        "piid": 2
+      }
+    },
+    {
+      "name": "quick-countdown-on",
+      "description": "on / 倒计时关闭 开关",
+      "type": "bool",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 8,
+        "piid": 1
+      }
+    },
+    {
+      "name": "duration",
+      "description": "duration / 时长",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        0,
+        1440,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 8,
+        "piid": 2
+      }
+    },
+    {
+      "name": "left-time",
+      "description": "left-time / 设备开启后,剩余的时间,0为未开启状态,非0为开启状态",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        0,
+        1440,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 8,
+        "piid": 3
+      }
+    },
+    {
+      "name": "max-power-limit-on",
+      "description": "on / 开关",
+      "type": "bool",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 9,
+        "piid": 1
+      }
+    },
+    {
+      "name": "max-power-limit-power",
+      "description": "power / 保护阈值",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        1500,
+        2500,
+        100
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 9,
+        "piid": 2
+      }
+    },
+    {
+      "name": "over-use-ele-alert-on",
+      "description": "on / 开关",
+      "type": "bool",
+      "rw": "rw",
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 10,
+        "piid": 1
+      }
+    },
+    {
+      "name": "over-ele-day",
+      "description": "over-ele-day / 过度用电提醒-日 默认3",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        1,
+        60,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 10,
+        "piid": 2
+      }
+    },
+    {
+      "name": "over-ele-month",
+      "description": "over-ele-month / 过度用电提醒-月 默认80",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        20,
+        1800,
+        20
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 10,
+        "piid": 3
+      }
+    },
+    {
+      "name": "on-off-count",
+      "description": "on-off-count / 开关次数",
+      "type": "uint",
+      "rw": "r",
+      "range": [
+        0,
+        255,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 12,
+        "piid": 1
+      }
+    },
+    {
+      "name": "temperature",
+      "description": "temperature / 设备温度",
+      "type": "uint",
+      "rw": "r",
+      "range": [
+        0,
+        150,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 12,
+        "piid": 2
+      }
+    },
+    {
+      "name": "charge-prt-ext-power",
+      "description": "power / 功率阈值",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        2,
+        600,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 14,
+        "piid": 1
+      }
+    },
+    {
+      "name": "charge-prt-ext-protect-time",
+      "description": "protect-time / 保护时长",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        1,
+        300,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 14,
+        "piid": 2
+      }
+    },
+    {
+      "name": "power-ext",
+      "description": "power-ext / 保护阈值",
+      "type": "uint",
+      "rw": "rw",
+      "range": [
+        300,
+        2500,
+        100
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 15,
+        "piid": 1
+      }
+    }
+  ],
+  "actions": [
+    {
+      "name": "toggle",
+      "description": "Toggle / 开关状态切换",
+      "method": {
+        "siid": 2,
+        "aiid": 1
+      }
+    }
+  ]
+}

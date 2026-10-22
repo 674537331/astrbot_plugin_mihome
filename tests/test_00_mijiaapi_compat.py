@@ -1,5 +1,6 @@
 import importlib
 import inspect
+import json
 import re
 import sys
 import unittest
@@ -86,6 +87,13 @@ class MijiaAPI413CompatibilityTests(unittest.TestCase):
             }
         )
         self.assertEqual(prop.rw, "rw")
+
+    def test_issue20_fixture_parses_with_real_pinned_dependency(self):
+        spec = json.loads((ROOT / "tests/fixtures/cuco_plug_v3_spec.json").read_text(encoding="utf-8"))
+        properties = {prop["name"]: self.dev_prop_class(prop) for prop in spec["properties"]}
+        self.assertEqual(properties["on"].method, {"siid": 2, "piid": 1})
+        self.assertEqual(properties["electric-power"].rw, "r")
+        self.assertEqual(properties["power-consumption"].method, {"siid": 11, "piid": 1})
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ const DEVICE_CATEGORIES = Object.freeze([
   "路由器类别",
   "音箱类别",
   "开关类别",
+  "插座类别",
   "门磁传感器类别",
   "燃气传感器类别",
 ]);

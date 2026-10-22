@@ -258,6 +258,19 @@ class WebAPIBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(category_map["客厅灯"], "开关类别")
 
+    def test_plug_category_roundtrips_and_matches_reported_model(self):
+        api, _plugin = self.build_api()
+        _devices, categories = api._parse_mapping_rows({"mappings": [
+            {"alias": "插座", "did": "123", "category": "插座类别"},
+        ]})
+        self.assertEqual(categories["插座"], "插座类别")
+        rows = api._build_device_rows([{"did": "123", "model": "cuco.plug.v3"}])
+        self.assertTrue(rows[0]["profile_matched"])
+        self.assertIn("插座类别", self.web.CATEGORY_OPTIONS)
+        script = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
+        category_source = re.search(r"const DEVICE_CATEGORIES = Object.freeze\((\[.*?\])\);", script, re.DOTALL)
+        self.assertEqual(json.loads(category_source.group(1).replace(",\n]", "\n]")), list(self.web.CATEGORY_OPTIONS))
+
     def test_mapping_save_is_confirmed_once_and_preserves_orphan_category(self):
         api, plugin = self.build_api(
             {
