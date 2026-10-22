@@ -32,6 +32,7 @@ from .device_profiles import (
     CATEGORY_ROUTER,
     CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
+    CATEGORY_PLUG,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
     get_device_property_value_map,
@@ -100,12 +101,13 @@ READONLY_ALLOWED_CATEGORIES = {
     CATEGORY_ROUTER,
     CATEGORY_SPEAKER,
     CATEGORY_SWITCH,
+    CATEGORY_PLUG,
     CATEGORY_DOOR_SENSOR,
     CATEGORY_GAS_SENSOR,
 }
 
 
-@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.1.2")
+@register(PLUGIN_NAME, "Ryan", "米家云端智能管家", "8.1.3")
 class MiHomeControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -156,14 +158,12 @@ class MiHomeControlPlugin(Star):
         if not parts:
             return None, []
 
-        exact_alias = parts[0]
-        if exact_alias in device_map:
-            return exact_alias, parts[1:]
-
         best_alias = None
         best_len = 0
         for alias in device_map.keys():
-            alias_parts = alias.split()
+            # shlex keeps a quoted multiword alias in one token. Otherwise
+            # choose the longest prefix before interpreting control arguments.
+            alias_parts = [alias] if alias == parts[0] else alias.split()
             if parts[:len(alias_parts)] == alias_parts and len(alias_parts) > best_len:
                 best_alias = alias
                 best_len = len(alias_parts)

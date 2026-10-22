@@ -66,6 +66,7 @@ except ImportError:
         pass
 
 from .data_manager import MiHomeDataManager  # noqa: E402
+from .device_profiles import get_model_profile  # noqa: E402
 
 LOGIN_IDLE = "idle"
 LOGIN_RUNNING = "running"
@@ -281,27 +282,38 @@ class MiHomeClient:
             asyncio.to_thread(func, *args, **kwargs),
         )
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=warn_after,
-            )
-        except asyncio.TimeoutError:
-            if task.done():
-                return await task
-            logger.warning(
-                f"[MiHome] {operation} 响应较慢，将保持串行等待以避免重复操作。"
-            )
-            return await task
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=warn_after,
+                )
+            except asyncio.TimeoutError:
+                if task.done():
+                    return task.result()
+                logger.warning(
+                    f"[MiHome] {operation} 响应较慢，将保持串行等待以避免重复操作。"
+                )
+                return await asyncio.shield(task)
         except asyncio.CancelledError:
             logger.warning(
                 f"[MiHome] {operation} 等待被取消，将先回收正在运行的同步调用。"
             )
-            try:
-                await asyncio.shield(task)
-            except Exception as exc:
-                logger.debug(
-                    f"[MiHome] {operation} 取消后回收异常: {type(exc).__name__}"
-                )
+            # A second cancellation must not let a live worker escape the
+            # caller's API lock. Shield and drain it before propagating cancel.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not task.cancelled():
+                try:
+                    task.result()
+                except Exception as exc:
+                    logger.debug(
+                        f"[MiHome] {operation} 取消后回收异常: {type(exc).__name__}"
+                    )
             raise
 
     async def _stop_login_process_locked(
@@ -582,6 +594,26 @@ class MiHomeClient:
         if unit in ("none", "", None):
             return ""
         return f" {unit}"
+
+    def _format_readable_value(
+        self, device: Any, key: str, prop_info: Any, value: Any,
+    ) -> str:
+        """统一格式化状态；仅精确型号画像可以覆盖单位与数值比例。"""
+
+        profile = get_model_profile(getattr(device, "model", ""))
+        value_format = profile.get("readable_value_formats", {}).get(key)
+        if value_format:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("状态值不是有效数值")
+            scaled = value * value_format["scale"]
+            if not math.isfinite(scaled):
+                raise ValueError("状态值不是有限数值")
+            # Fixed precision avoids scientific notation and centi-unit errors.
+            number = f"{scaled:.2f}".rstrip("0").rstrip(".")
+            return f"{number}{value_format['suffix']}"
+        if isinstance(value, float):
+            value = round(value, 2)
+        return f"{value}{self._unit_suffix(getattr(prop_info, 'unit', ''))}"
 
     @staticmethod
     def _device_spec_has_compatible_schema(spec: Any) -> bool:
@@ -1296,31 +1328,40 @@ class MiHomeClient:
             async with self._api_lock:
                 self._clear_prepared_device_cache()
                 own = await self._run_sync_call(
+                    self._read_device_directory,
                     self.api.get_devices_list,
+                    "自有设备列表",
                     warn_after=20.0,
                     operation="同步设备列表",
                 )
-                if not isinstance(own, list):
-                    own = []
-
                 shared = []
                 shared_error = ""
                 if hasattr(self.api, "get_shared_devices_list"):
                     try:
                         shared = await self._run_sync_call(
+                            self._read_device_directory,
                             self.api.get_shared_devices_list,
+                            "共享设备列表",
                             warn_after=20.0,
                             operation="同步共享设备列表",
                         )
-                        if not isinstance(shared, list):
-                            shared = []
                     except Exception as e:
                         shared_error = f"共享列表获取异常: {type(e).__name__}"
                         logger.warning(f"[MiHome] {shared_error}")
 
+                previous_state = self.data_manager.load_state()
                 merged = {}
-                did_to_name = {}
-                did_to_model = {}
+                # A partial sync cannot prove cached shared devices disappeared.
+                previous_names = previous_state.get("did_to_name", {})
+                previous_models = previous_state.get("did_to_model", {})
+                did_to_name = (
+                    dict(previous_names)
+                    if shared_error and isinstance(previous_names, dict) else {}
+                )
+                did_to_model = (
+                    dict(previous_models)
+                    if shared_error and isinstance(previous_models, dict) else {}
+                )
                 for d in (own + shared):
                     if isinstance(d, dict) and d.get("did"):
                         did_str = str(d["did"]).strip()
@@ -1334,7 +1375,7 @@ class MiHomeClient:
                     did_to_model=did_to_model,
                 )
                 previous_login_error = str(
-                    self.data_manager.load_state().get(
+                    previous_state.get(
                         "last_login_error",
                         "",
                     )
@@ -1366,6 +1407,9 @@ class MiHomeClient:
         except APIError as e:
             self.data_manager.update_state(last_login_error="云端接口异常")
             raise MiHomeClientError("cloud_api_error") from e
+        except MiHomeDeviceDirectoryError:
+            self.data_manager.update_state(last_login_error="云端接口异常：设备列表响应结构异常")
+            raise
         except MiHomeClientError:
             raise
         except Exception as e:
@@ -1388,7 +1432,9 @@ class MiHomeClient:
                 )
 
             if not isinstance(scenes, list):
-                scenes = []
+                message = "场景列表响应结构异常，请稍后重新同步"
+                self.data_manager.update_state(last_scene_error=message)
+                raise MiHomeClientError(message)
 
             normalized = []
             for item in scenes:
@@ -1683,13 +1729,12 @@ class MiHomeClient:
                                 result["readable_keys"].append(norm_k)
                                 continue
 
-                            val = item["value"]
-                            if isinstance(val, float):
-                                val = round(val, 2)
-                            unit_str = self._unit_suffix(
-                                getattr(prop_info, "unit", "")
-                            )
-                            result["readable"][norm_k] = f"{val}{unit_str}"
+                            try:
+                                result["readable"][norm_k] = self._format_readable_value(
+                                    device, norm_k, prop_info, item["value"],
+                                )
+                            except (TypeError, ValueError, OverflowError):
+                                result["readable_keys"].append(norm_k)
 
                     return result
 
