@@ -6,7 +6,6 @@ import sys
 import asyncio
 import json
 import math
-import logging
 import functools
 import inspect
 import subprocess
@@ -22,12 +21,8 @@ import requests
 
 from astrbot.api import logger
 
-# mijiaAPI 4.1.3 的 DEBUG 日志会输出请求体与认证数据。必须在导入并创建
-# 任何上游实例前抑制，避免 DID、动作文本及登录令牌进入 AstrBot 日志。
-logging.getLogger("mijiaAPI").setLevel(logging.WARNING)
-
 try:
-    from mijiaAPI import (  # noqa: E402 - security guard must run before import
+    from mijiaAPI import (
         mijiaAPI,
         mijiaDevice,
         LoginError,
@@ -37,7 +32,7 @@ try:
         DeviceActionError,
         APIError,
     )
-    from mijiaAPI.devices import (  # noqa: E402
+    from mijiaAPI.devices import (
         DevAction,
         DevProp,
     )
@@ -48,6 +43,12 @@ except (ImportError, OSError) as exc:
             "请在 AstrBot 使用的 Python 环境中重新安装 pycryptodome==3.23.0。"
         ) from exc
     raise
+
+from ._upstream_logs import silence_mijiaapi_logs
+
+# 固定版本的导入不执行业务请求；在创建实例前静默其原文日志，防止
+# DEBUG 的令牌/请求体及 WARNING 的设备标识/控制值进入日志。
+silence_mijiaapi_logs()
 
 try:
     from requests.exceptions import (

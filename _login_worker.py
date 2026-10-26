@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 import base64
 import sys
-import logging
 import os
 import stat
 from pathlib import Path
 from urllib import parse
 
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("mijiaAPI").setLevel(logging.WARNING)
+from _upstream_logs import silence_mijiaapi_logs
 
 WORKER_QR_PAYLOAD_START = "[WORKER_QR_LOGIN_URL]"
 WORKER_QR_PAYLOAD_END = "[/WORKER_QR_LOGIN_URL]"
@@ -26,6 +24,8 @@ except (ImportError, OSError) as e:
     else:
         print(f"ERROR: 缺少依赖库 - {e}", flush=True)
     sys.exit(1)
+
+silence_mijiaapi_logs()
 
 
 def is_link_or_reparse_point(path: Path) -> bool:
