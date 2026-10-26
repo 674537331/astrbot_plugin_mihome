@@ -2,6 +2,8 @@
 
 基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 框架开发的米家智能家居云端控制插件，支持聊天指令、场景与 LLM Tool。
 
+当前版本：**v8.1.4**（2026-10-26）。本次修复插件日志规范与上游敏感日志输出；近期的插座适配、只读状态兼容及扫码登录修复详见 [更新日志](CHANGELOG.md)。
+
 <div align="center">
 
 [![Moe Counter](https://count.getloli.com/get/@astrbot_plugin_mihome?theme=moebooru)](https://github.com/674537331/astrbot_plugin_mihome)
