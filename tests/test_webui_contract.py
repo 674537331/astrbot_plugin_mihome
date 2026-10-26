@@ -1152,14 +1152,42 @@ class WebUIStaticContractTests(unittest.TestCase):
         self.assertNotIn("event.send", login_source)
         self.assertNotIn("qr_callback", login_source)
 
-    def test_upstream_mijia_debug_logs_are_suppressed_before_import(self):
-        client = (ROOT / "mihome_client.py").read_text(encoding="utf-8")
-        worker = (ROOT / "_login_worker.py").read_text(encoding="utf-8")
+    def test_plugin_logging_uses_only_astrbot_logger(self):
+        for path in ROOT.glob("*.py"):
+            with self.subTest(path=path.name):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        self.assertFalse(any(
+                            alias.name.split(".")[0] == "logging"
+                            for alias in node.names
+                        ))
+                    elif isinstance(node, ast.ImportFrom):
+                        self.assertNotEqual(
+                            (node.module or "").split(".")[0], "logging",
+                        )
+                        if any(alias.name == "logger" for alias in node.names):
+                            self.assertEqual(node.module, "astrbot.api")
+                    elif isinstance(node, ast.Attribute):
+                        self.assertNotIn(node.attr, ("getLogger", "basicConfig"))
 
-        guard = 'logging.getLogger("mijiaAPI").setLevel(logging.WARNING)'
-        self.assertIn(guard, client)
-        self.assertLess(client.index(guard), client.index("from mijiaAPI import"))
-        self.assertIn(guard, worker)
+    def test_upstream_logs_are_suppressed_before_api_use(self):
+        for name in ("mihome_client.py", "_login_worker.py"):
+            with self.subTest(path=name):
+                tree = ast.parse((ROOT / name).read_text(encoding="utf-8"))
+                guards = [
+                    index for index, node in enumerate(tree.body)
+                    if isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id == "silence_mijiaapi_logs"
+                ]
+                self.assertEqual(len(guards), 1)
+                first_function = next(
+                    index for index, node in enumerate(tree.body)
+                    if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+                )
+                self.assertLess(guards[0], first_function)
 
     def test_scene_tool_admin_check_uses_astrbot_event_only(self):
         tree = ast.parse(MAIN_PATH.read_text(encoding="utf-8"))
